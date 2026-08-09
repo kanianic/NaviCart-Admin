@@ -32,7 +32,7 @@ async function sb(path, options = {}) {
     ...options,
     headers: {
       apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      Authorization: `Bearer ${currentAccessToken || SUPABASE_ANON_KEY}`,
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
       ...(options.headers || {}),
@@ -46,8 +46,111 @@ async function sb(path, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+// Holds the logged-in owner's token once they sign in; sb() uses it
+// automatically so writes are attributed to the right account.
+let currentAccessToken = null;
+
+async function authRequest(grantPath, email, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/${grantPath}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error_description || data.msg || data.error || `${res.status} ${res.statusText}`);
+  }
+  return data;
+}
+
+function AuthScreen({ onAuthed }) {
+  const [mode, setMode] = useState('login'); // login | signup
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const submit = async () => {
+    if (!email.trim() || !password) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const data = await authRequest(
+        mode === 'login' ? 'token?grant_type=password' : 'signup',
+        email.trim(),
+        password
+      );
+      if (data.access_token && data.user) {
+        onAuthed({ accessToken: data.access_token, user: data.user });
+      } else {
+        setNotice('Account created — check your email to confirm, then log in.');
+        setMode('login');
+      }
+    } catch (e) {
+      setError(e.message);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" style={{ backgroundColor: BG }}>
+      <div className="w-full max-w-sm">
+        <div className="flex items-center gap-2 mb-2">
+          <Store size={18} color={ORANGE} />
+          <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>NAVICART · STORE SETUP</span>
+        </div>
+        <h1 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: CREAM, fontSize: 30, fontWeight: 700 }} className="mb-6">
+          {mode === 'login' ? 'Log in' : 'Create your account'}
+        </h1>
+
+        <div className="rounded-xl p-5" style={{ backgroundColor: CREAM }}>
+          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>EMAIL</label>
+          <input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            type="email"
+            className="w-full rounded-lg px-3 py-2 text-sm border outline-none mt-1 mb-3"
+            style={{ borderColor: '#E5DDCB', color: INK }}
+          />
+          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>PASSWORD</label>
+          <input
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type="password"
+            className="w-full rounded-lg px-3 py-2 text-sm border outline-none mt-1 mb-4"
+            style={{ borderColor: '#E5DDCB', color: INK }}
+            onKeyDown={(e) => e.key === 'Enter' && submit()}
+          />
+          <button
+            onClick={submit}
+            disabled={busy}
+            className="w-full rounded-lg py-2.5 text-sm font-bold"
+            style={{ backgroundColor: ORANGE, color: BG }}
+          >
+            {busy ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Sign up'}
+          </button>
+
+          {error && <p className="text-xs mt-3" style={{ color: RED }}>{error}</p>}
+          {notice && <p className="text-xs mt-3" style={{ color: '#4C6B45' }}>{notice}</p>}
+
+          <button
+            onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setNotice(''); }}
+            className="text-xs mt-4 block mx-auto"
+            style={{ color: '#8C7A4A' }}
+          >
+            {mode === 'login' ? "Don't have an account? Sign up" : 'Already have an account? Log in'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function StoreAdmin() {
-  const [phase, setPhase] = useState('loading'); // loading | landing | editor
+  const [session, setSession] = useState(null); // {accessToken, user}
+  const [phase, setPhase] = useState('auth'); // auth | loading | landing | editor
   const [storeList, setStoreList] = useState([]);
   const [newStoreName, setNewStoreName] = useState('');
   const [store, setStore] = useState(null); // {id, slug, name}
@@ -58,14 +161,24 @@ export default function StoreAdmin() {
   const [errorMsg, setErrorMsg] = useState('');
   const [opening, setOpening] = useState(false);
 
-  useEffect(() => {
-    loadStores();
-  }, []);
+  function handleAuthed(newSession) {
+    currentAccessToken = newSession.accessToken;
+    setSession(newSession);
+    loadStores(newSession);
+  }
 
-  async function loadStores() {
+  function logOut() {
+    currentAccessToken = null;
+    setSession(null);
+    setStore(null);
+    setPhase('auth');
+  }
+
+  async function loadStores(activeSession) {
     setPhase('loading');
     try {
-      const rows = await sb('stores?select=id,slug,name&order=name');
+      const uid = (activeSession || session).user.id;
+      const rows = await sb(`stores?select=id,slug,name&owner_id=eq.${uid}&order=name`);
       setStoreList(rows || []);
     } catch (e) {
       setErrorMsg('Could not reach the database. Check your connection.');
@@ -98,7 +211,10 @@ export default function StoreAdmin() {
     setOpening(true);
     setErrorMsg('');
     try {
-      const rows = await sb('stores', { method: 'POST', body: JSON.stringify({ slug: slugify(name), name }) });
+      const rows = await sb('stores', {
+        method: 'POST',
+        body: JSON.stringify({ slug: slugify(name), name, owner_id: session.user.id }),
+      });
       const s = rows[0];
       setAisles([]);
       setProducts([]);
@@ -250,6 +366,8 @@ export default function StoreAdmin() {
 
   return (
     <div className="min-h-screen w-full" style={{ backgroundColor: BG, fontFamily: 'system-ui, sans-serif' }}>
+      {phase === 'auth' && <AuthScreen onAuthed={handleAuthed} />}
+
       {phase === 'loading' && (
         <div className="min-h-screen flex items-center justify-center">
           <Loader2 className="animate-spin" size={28} color={CREAM} />
@@ -265,6 +383,7 @@ export default function StoreAdmin() {
           onCreate={createStore}
           opening={opening}
           errorMsg={errorMsg}
+          onLogOut={logOut}
         />
       )}
 
@@ -296,13 +415,16 @@ function SyncBadge({ sync }) {
   return <span className="flex items-center gap-1 text-xs" style={{ color: GREEN }}><Cloud size={11} /> Synced live</span>;
 }
 
-function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, opening, errorMsg }) {
+function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, opening, errorMsg, onLogOut }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-6 py-16">
       <div className="w-full max-w-md">
-        <div className="flex items-center gap-2 mb-2">
-          <Store size={18} color={ORANGE} />
-          <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>NAVICART · STORE SETUP</span>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <Store size={18} color={ORANGE} />
+            <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>NAVICART · STORE SETUP</span>
+          </div>
+          <button onClick={onLogOut} className="text-xs" style={{ color: MUTED }}>Log out</button>
         </div>
         <h1 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: CREAM, fontSize: 34, fontWeight: 700, lineHeight: 1.15 }} className="mb-1">
           Get your aisles online
