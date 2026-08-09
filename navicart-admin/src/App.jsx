@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff } from 'lucide-react';
+import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff } from 'lucide-react';
 
 const INK = '#2B241A';
 const BG = '#1E2B22';
@@ -156,6 +156,7 @@ export default function StoreAdmin() {
   const [store, setStore] = useState(null); // {id, slug, name}
   const [aisles, setAisles] = useState([]); // [{id, number, name}]
   const [products, setProducts] = useState([]); // [{id, key, label, aisle_number, price, stock}]
+  const [promos, setPromos] = useState([]); // [{id, aisle_number, text}]
   const [tab, setTab] = useState('aisles');
   const [sync, setSync] = useState('idle'); // idle | saving | error
   const [errorMsg, setErrorMsg] = useState('');
@@ -190,12 +191,14 @@ export default function StoreAdmin() {
     setOpening(true);
     setErrorMsg('');
     try {
-      const [aisleRows, productRows] = await Promise.all([
+      const [aisleRows, productRows, promoRows] = await Promise.all([
         sb(`aisles?store_id=eq.${s.id}&select=*&order=number`),
         sb(`products?store_id=eq.${s.id}&select=*&order=aisle_number`),
+        sb(`promos?store_id=eq.${s.id}&select=*&order=created_at`),
       ]);
       setAisles(aisleRows || []);
       setProducts(productRows || []);
+      setPromos(promoRows || []);
       setStore(s);
       setTab('aisles');
       setPhase('editor');
@@ -218,6 +221,7 @@ export default function StoreAdmin() {
       const s = rows[0];
       setAisles([]);
       setProducts([]);
+      setPromos([]);
       setStore(s);
       setTab('aisles');
       setPhase('editor');
@@ -226,6 +230,33 @@ export default function StoreAdmin() {
       setErrorMsg(`Could not create store: ${e.message || 'unknown error'}`);
     }
     setOpening(false);
+  }
+
+  // ---- promo ops ----
+  async function addPromo(aisleNumber, text) {
+    if (!text.trim() || !aisleNumber) return;
+    setSync('saving');
+    try {
+      const rows = await sb('promos', {
+        method: 'POST',
+        body: JSON.stringify({ store_id: store.id, aisle_number: aisleNumber, text: text.trim() }),
+      });
+      setPromos((prev) => [...prev, rows[0]]);
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
+  }
+
+  async function deletePromo(id) {
+    setPromos((prev) => prev.filter((p) => p.id !== id));
+    setSync('saving');
+    try {
+      await sb(`promos?id=eq.${id}`, { method: 'DELETE' });
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
   }
 
   function backToStores() {
@@ -392,6 +423,7 @@ export default function StoreAdmin() {
           store={store}
           aisles={aisles}
           products={products}
+          promos={promos}
           tab={tab}
           setTab={setTab}
           onBack={backToStores}
@@ -403,6 +435,8 @@ export default function StoreAdmin() {
           updateProduct={updateProduct}
           deleteProduct={deleteProduct}
           bulkImport={bulkImport}
+          addPromo={addPromo}
+          deletePromo={deletePromo}
         />
       )}
     </div>
@@ -485,8 +519,9 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
 }
 
 function EditorShell({
-  store, aisles, products, tab, setTab, onBack, sync,
+  store, aisles, products, promos, tab, setTab, onBack, sync,
   addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport,
+  addPromo, deletePromo,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
 
@@ -509,6 +544,7 @@ function EditorShell({
           {[
             { id: 'aisles', label: 'Aisles', icon: LayoutGrid },
             { id: 'products', label: 'Products', icon: Tags },
+            { id: 'deals', label: 'Deals', icon: Tag },
             { id: 'preview', label: 'Shopper preview', icon: Eye },
           ].map((t) => (
             <button
@@ -533,8 +569,91 @@ function EditorShell({
         {tab === 'products' && (
           <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} />
         )}
+        {tab === 'deals' && (
+          <DealsTab aisles={aisles} promos={promos} addPromo={addPromo} deletePromo={deletePromo} />
+        )}
         {tab === 'preview' && <PreviewTab aisles={aisles} products={products} unmapped={unmapped} />}
       </div>
+    </div>
+  );
+}
+
+function DealsTab({ aisles, promos, addPromo, deletePromo }) {
+  const [aisleNumber, setAisleNumber] = useState(aisles[0]?.number || '');
+  const [text, setText] = useState('');
+
+  const submit = () => {
+    if (!text.trim() || !aisleNumber) return;
+    addPromo(Number(aisleNumber), text);
+    setText('');
+  };
+
+  const aisleName = (num) => aisles.find((a) => a.number === num)?.name || 'Unknown aisle';
+
+  return (
+    <div className="max-w-xl">
+      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">
+        Deals
+      </h3>
+      <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>
+        Attach a deal to an aisle — shoppers see it automatically when that aisle is on their route.
+      </p>
+
+      {aisles.length === 0 ? (
+        <p className="text-sm italic" style={{ color: '#B4A87F' }}>Add an aisle first, then come back here.</p>
+      ) : (
+        <>
+          <div className="space-y-2 mb-6">
+            {promos.length === 0 && (
+              <p className="text-sm italic" style={{ color: '#B4A87F' }}>No deals yet — add your first one below.</p>
+            )}
+            {promos.map((p) => (
+              <div key={p.id} className="flex items-center gap-3 rounded-lg px-4 py-3" style={{ backgroundColor: PAPER }}>
+                <Tag size={15} color={ORANGE} className="flex-shrink-0" />
+                <div className="flex-1">
+                  <span className="text-xs font-bold block" style={{ color: '#8C7A4A' }}>{aisleName(p.aisle_number)}</span>
+                  <span className="text-sm" style={{ color: INK }}>{p.text}</span>
+                </div>
+                <button onClick={() => deletePromo(p.id)}>
+                  <Trash2 size={15} color={RED} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-lg p-4" style={{ backgroundColor: PAPER }}>
+            <div className="flex gap-2 mb-2">
+              <select
+                value={aisleNumber}
+                onChange={(e) => setAisleNumber(e.target.value)}
+                className="rounded-lg px-3 py-2.5 text-sm border outline-none"
+                style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+              >
+                {aisles.map((a) => (
+                  <option key={a.number} value={a.number}>{a.number} · {a.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="e.g. Buy one loaf, get one 50% off"
+                className="flex-1 rounded-lg px-3 py-2.5 text-sm border outline-none"
+                style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+                onKeyDown={(e) => e.key === 'Enter' && submit()}
+              />
+              <button
+                onClick={submit}
+                className="rounded-lg px-4 flex items-center gap-2 text-sm font-bold"
+                style={{ backgroundColor: ORANGE, color: BG }}
+              >
+                <Plus size={15} /> Add deal
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
