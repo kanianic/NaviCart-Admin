@@ -158,6 +158,46 @@ const CATEGORY_KEYWORDS = {
   Pets: ['dog food', 'cat food', 'cat litter', 'pet '],
 };
 
+// Same forgiving word-overlap logic the shopper app uses, ported
+// here so Insights can check "is this actually still a gap?" against
+// the live catalog instead of trusting a possibly-stale historical
+// log entry.
+const MATCH_STOPWORDS = new Set([
+  'lb', 'lbs', 'oz', 'pack', 'pk', 'ct', 'count', 'gal', 'qt', 'ml', 'l', 'g', 'kg',
+  'large', 'small', 'medium', 'fresh', 'organic', 'the', 'a', 'an', 'of', 'and',
+]);
+function tokenizeForMatch(str) {
+  return str
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => {
+      if (!w) return false;
+      if (MATCH_STOPWORDS.has(w)) return false;
+      if (/^\d+$/.test(w)) return false;
+      if (/^\d+(lb|lbs|oz|pk|ct|gal|qt|ml|kg|g|pack)$/.test(w)) return false;
+      return true;
+    });
+}
+function isNowCarried(rawName, products) {
+  const cleaned = (rawName || '').toLowerCase().trim();
+  if (!cleaned) return false;
+  const mapped = products.filter((p) => p.aisle_number != null);
+  const substringMatch = mapped.some((p) => {
+    const label = p.label.toLowerCase();
+    return cleaned.includes(label) || label.includes(cleaned);
+  });
+  if (substringMatch) return true;
+  const inputTokens = tokenizeForMatch(cleaned);
+  if (inputTokens.length === 0) return false;
+  return mapped.some((p) => {
+    const labelTokens = tokenizeForMatch(p.label);
+    if (labelTokens.length === 0) return false;
+    const shared = inputTokens.filter((t) => labelTokens.includes(t));
+    return shared.length / inputTokens.length >= 0.5;
+  });
+}
+
 function classifyOffline(existingCategories, rawText) {
   const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
   return lines.map((line) => {
@@ -1102,7 +1142,7 @@ function EditorShell({
         {tab === 'recipes' && (
           <RecipesTab recipes={recipes} addRecipe={addRecipe} deleteRecipe={deleteRecipe} />
         )}
-        {tab === 'insights' && <InsightsTab store={store} aisles={aisles} addProduct={addProduct} />}
+        {tab === 'insights' && <InsightsTab store={store} aisles={aisles} products={products} addProduct={addProduct} />}
         {tab === 'team' && isOwner && (
           <TeamTab teamMembers={teamMembers} addStaff={addStaff} removeStaff={removeStaff} />
         )}
@@ -2224,7 +2264,7 @@ function ProductTag({ product, aisles, updateProduct, deleteProduct }) {
   );
 }
 
-function InsightsTab({ store, aisles, addProduct }) {
+function InsightsTab({ store, aisles, products, addProduct }) {
   const [status, setStatus] = useState('loading'); // loading | ready | error
   const [events, setEvents] = useState([]);
   const [addedKeys, setAddedKeys] = useState([]);
@@ -2255,7 +2295,13 @@ function InsightsTab({ store, aisles, addProduct }) {
   const routesBuilt = events.filter((e) => e.type === 'route_built');
 
   const topSearched = countBy(searches, 'item_name').slice(0, 8);
-  const topNotFound = countBy(notFound, 'item_name').slice(0, 8);
+  // Only show items that are STILL a real gap — re-checked against
+  // the live catalog, not just trusted from when the event was
+  // first logged. A stale "don't carry" for something you actually
+  // stock now is exactly the kind of thing that erodes trust in
+  // this list.
+  const stillNotCarried = notFound.filter((e) => !isNowCarried(e.item_name, products));
+  const topNotFound = countBy(stillNotCarried, 'item_name').slice(0, 8);
   const topAisles = countBy(aisleVisits, 'aisle_number').slice(0, 8);
   const aisleName = (num) => aisles.find((a) => String(a.number) === String(num))?.name || `Aisle ${num}`;
 
@@ -2306,7 +2352,7 @@ function InsightsTab({ store, aisles, addProduct }) {
             <StatCard label="Routes mapped" value={routesBuilt.length} />
             <StatCard label="Searches" value={searches.length} />
             <StatCard label="Aisles visited" value={aisleVisits.length} />
-            <StatCard label="Items you don't carry" value={new Set(notFound.map((e) => e.item_name)).size} />
+            <StatCard label="Items you don't carry" value={new Set(stillNotCarried.map((e) => e.item_name)).size} />
           </div>
 
           <InsightSection icon={Search} label="TOP SEARCHED">
