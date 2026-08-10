@@ -1968,6 +1968,11 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
   const [newName, setNewName] = useState('');
   const [newPrice, setNewPrice] = useState('');
   const [showScanner, setShowScanner] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const filteredProducts = products.filter((p) =>
+    p.label.toLowerCase().includes(search.trim().toLowerCase())
+  );
 
   const runImport = async () => {
     setImporting(true);
@@ -2045,10 +2050,32 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
         </div>
       )}
 
+      <div className="flex items-center justify-between mb-3 mt-2">
+        <div className="relative flex-1 max-w-sm">
+          <Search size={14} color="#B4A87F" className="absolute" style={{ left: 10, top: 10 }} />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search products…"
+            className="w-full rounded-lg border pl-8 pr-3 py-2 text-sm outline-none"
+            style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+          />
+        </div>
+        <span className="text-xs font-semibold ml-3" style={{ color: '#8C7A4A' }}>
+          {search.trim() ? `${filteredProducts.length} of ${products.length}` : `${products.length} products`}
+        </span>
+      </div>
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
-        {products.map((p) => (
-          <ProductTag key={p.id} product={p} aisles={aisles} updateProduct={updateProduct} deleteProduct={deleteProduct} />
-        ))}
+        {filteredProducts.length === 0 ? (
+          <p className="text-sm italic col-span-full" style={{ color: '#B4A87F' }}>
+            No products match "{search}".
+          </p>
+        ) : (
+          filteredProducts.map((p) => (
+            <ProductTag key={p.id} product={p} aisles={aisles} updateProduct={updateProduct} deleteProduct={deleteProduct} />
+          ))
+        )}
       </div>
 
       <div className="rounded-lg p-4 flex gap-2 items-center flex-wrap" style={{ backgroundColor: PAPER }}>
