@@ -1086,6 +1086,7 @@ function EditorShell({
           <FloorPlanTab
             store={store}
             aisles={aisles}
+            renameAisle={renameAisle}
             moveAisleLocal={moveAisleLocal}
             saveAisleLayout={saveAisleLayout}
             moveStorePointLocal={moveStorePointLocal}
@@ -1254,7 +1255,7 @@ function AdminView({ stores, onSuspend, onDelete, onBack }) {
   );
 }
 
-function FloorPlanTab({ store, aisles, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint }) {
+function FloorPlanTab({ store, aisles, renameAisle, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint }) {
   const canvasRef = useRef(null);
   const [dragId, setDragId] = useState(null);
   const [resizeId, setResizeId] = useState(null);
@@ -1386,7 +1387,15 @@ function FloorPlanTab({ store, aisles, moveAisleLocal, saveAisleLayout, moveStor
               }}
             >
               <span className="text-xs font-bold font-mono" style={{ color: '#5A3E14' }}>{a.number}</span>
-              <span className="text-xs font-semibold text-center px-1" style={{ color: '#5A3E14' }}>{a.name}</span>
+              <input
+                value={a.name}
+                onChange={(e) => renameAisle(a.id, e.target.value)}
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                className="text-xs font-semibold text-center bg-transparent outline-none w-full px-1 cursor-text"
+                style={{ color: '#5A3E14' }}
+              />
               <div
                 onMouseDown={(e) => startResize(e, a)}
                 onTouchStart={(e) => startResize(e, a)}
