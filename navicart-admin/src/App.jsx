@@ -963,6 +963,14 @@ function EditorShell({
   addPromo, deletePromo, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint,
   recipes, addRecipe, deleteRecipe, deleteStore, setTransferEmail,
 }) {
+  // Lives here, not inside ProductsTab, so a paste + review survives
+  // switching to another tab (e.g. Aisles) and back — ProductsTab
+  // itself unmounts on tab switch, EditorShell does not.
+  const [importState, setImportStateRaw] = useState({
+    rawText: '', status: 'idle', reviewItems: [], errorMsg: '', resultMsg: '',
+  });
+  const setImportState = (patch) => setImportStateRaw((prev) => ({ ...prev, ...patch }));
+
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
   const isOwner = store.owner_id === session?.user?.id;
   const tr = STRINGS[lang];
@@ -1024,7 +1032,7 @@ function EditorShell({
           />
         )}
         {tab === 'products' && (
-          <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} commitSmartImport={commitSmartImport} />
+          <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} commitSmartImport={commitSmartImport} importState={importState} setImportState={setImportState} />
         )}
         {tab === 'deals' && (
           <DealsTab aisles={aisles} promos={promos} addPromo={addPromo} deletePromo={deletePromo} />
@@ -1624,12 +1632,8 @@ function AislesTab({ aisles, renameAisle, deleteAisle, addAisle }) {
   );
 }
 
-function SmartImportPanel({ aisles, commitSmartImport }) {
-  const [rawText, setRawText] = useState('');
-  const [status, setStatus] = useState('idle'); // idle | review | saving | done
-  const [reviewItems, setReviewItems] = useState([]);
-  const [errorMsg, setErrorMsg] = useState('');
-  const [resultMsg, setResultMsg] = useState('');
+function SmartImportPanel({ aisles, commitSmartImport, importState, setImportState }) {
+  const { rawText, status, reviewItems, errorMsg, resultMsg } = importState;
 
   const knownCategories = Object.keys(CATEGORY_KEYWORDS);
   const categoryOptions = [...new Set([...aisles.map((a) => a.name), ...knownCategories])];
@@ -1640,35 +1644,33 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
     const existing = aisles.map((a) => a.name);
     const items = classifyOffline(existing, rawText);
     if (items.length === 0) {
-      setErrorMsg('Nothing to sort — check the pasted text.');
+      setImportState({ errorMsg: 'Nothing to sort — check the pasted text.' });
       return;
     }
-    setErrorMsg('');
-    setReviewItems(items);
-    setStatus('review');
+    setImportState({ errorMsg: '', reviewItems: items, status: 'review' });
   };
 
   const updateReviewItem = (idx, patch) => {
-    setReviewItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+    setImportState({ reviewItems: reviewItems.map((it, i) => (i === idx ? { ...it, ...patch } : it)) });
   };
   const removeReviewItem = (idx) => {
-    setReviewItems((prev) => prev.filter((_, i) => i !== idx));
+    setImportState({ reviewItems: reviewItems.filter((_, i) => i !== idx) });
   };
 
   const save = async () => {
-    setStatus('saving');
+    setImportState({ status: 'saving' });
     try {
       const result = await commitSmartImport(reviewItems);
-      setResultMsg(
-        `Saved ${result.productCount} product${result.productCount === 1 ? '' : 's'}` +
-          (result.newAisleCount ? ` and created ${result.newAisleCount} new aisle${result.newAisleCount === 1 ? '' : 's'}.` : '.')
-      );
-      setStatus('done');
-      setRawText('');
-      setReviewItems([]);
+      setImportState({
+        resultMsg:
+          `Saved ${result.productCount} product${result.productCount === 1 ? '' : 's'}` +
+          (result.newAisleCount ? ` and created ${result.newAisleCount} new aisle${result.newAisleCount === 1 ? '' : 's'}.` : '.'),
+        status: 'done',
+        rawText: '',
+        reviewItems: [],
+      });
     } catch (e) {
-      setErrorMsg('Saving failed — check your connection and try again.');
-      setStatus('review');
+      setImportState({ errorMsg: 'Saving failed — check your connection and try again.', status: 'review' });
     }
   };
 
@@ -1680,14 +1682,15 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
       </div>
       <p className="text-xs mb-3" style={{ color: '#D9CBAE' }}>
         Paste your raw product list — just names, or "name, price" — and it's automatically sorted into aisles.
-        Anything it doesn't recognize is flagged for you to assign in one click.
+        Anything it doesn't recognize is flagged for you to assign — type a brand new aisle name if you need one,
+        no need to leave this screen.
       </p>
 
       {status === 'idle' && (
         <>
           <textarea
             value={rawText}
-            onChange={(e) => setRawText(e.target.value)}
+            onChange={(e) => setImportState({ rawText: e.target.value })}
             rows={6}
             placeholder={'Whole milk, 3.49\nSourdough bread\nBananas, 0.59\nCheddar cheese, 4.29\n...'}
             className="w-full rounded-lg border px-3 py-2 text-sm outline-none mb-2"
@@ -1708,10 +1711,14 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
         <>
           {unsortedCount > 0 && (
             <p className="text-xs mb-2" style={{ color: '#F2C18D' }}>
-              {unsortedCount} item{unsortedCount === 1 ? "wasn't" : "s weren't"} recognized — pick a category for
-              {unsortedCount === 1 ? ' it' : ' them'} below before saving.
+              {unsortedCount} item{unsortedCount === 1 ? "wasn't" : "s weren't"} recognized — type or pick a category
+              for {unsortedCount === 1 ? 'it' : 'them'} below before saving. Typing a brand new name creates that
+              aisle automatically.
             </p>
           )}
+          <datalist id="smart-import-categories">
+            {categoryOptions.map((c) => <option key={c} value={c} />)}
+          </datalist>
           <div className="rounded-lg overflow-hidden mb-3" style={{ backgroundColor: CREAM }}>
             {reviewItems.map((item, idx) => (
               <div
@@ -1725,17 +1732,14 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
                   className="flex-1 text-sm bg-transparent outline-none"
                   style={{ color: INK }}
                 />
-                <select
+                <input
+                  list="smart-import-categories"
                   value={item.category || ''}
                   onChange={(e) => updateReviewItem(idx, { category: e.target.value })}
+                  placeholder="Type or pick a category"
                   className="text-xs rounded px-2 py-1 border outline-none"
-                  style={{ borderColor: item.category ? '#E5DDCB' : ORANGE, color: INK, backgroundColor: '#fff' }}
-                >
-                  <option value="" disabled>Choose category…</option>
-                  {categoryOptions.map((c) => (
-                    <option key={c} value={c}>{c}{!aisles.some((a) => a.name.toLowerCase() === c.toLowerCase()) ? ' (new)' : ''}</option>
-                  ))}
-                </select>
+                  style={{ borderColor: item.category ? '#E5DDCB' : ORANGE, color: INK, backgroundColor: '#fff', width: 160 }}
+                />
                 <div className="flex items-center gap-1 font-mono text-sm" style={{ color: INK }}>
                   $<input
                     value={item.price ?? ''}
@@ -1759,7 +1763,7 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
               {status === 'saving' && <Loader2 size={14} className="animate-spin" />}
               {status === 'saving' ? 'Saving…' : `Looks good — save ${reviewItems.length} product${reviewItems.length === 1 ? '' : 's'}`}
             </button>
-            <button onClick={() => { setStatus('idle'); setReviewItems([]); }} className="text-xs" style={{ color: '#D9CBAE' }}>
+            <button onClick={() => setImportState({ status: 'idle', reviewItems: [] })} className="text-xs" style={{ color: '#D9CBAE' }}>
               Start over
             </button>
           </div>
@@ -1770,14 +1774,14 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
       {status === 'done' && (
         <div className="flex items-center gap-2">
           <p className="text-sm" style={{ color: '#B8E0A0' }}>{resultMsg}</p>
-          <button onClick={() => setStatus('idle')} className="text-xs underline" style={{ color: '#D9CBAE' }}>Import more</button>
+          <button onClick={() => setImportState({ status: 'idle' })} className="text-xs underline" style={{ color: '#D9CBAE' }}>Import more</button>
         </div>
       )}
     </div>
   );
 }
 
-function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduct, bulkImport, commitSmartImport }) {
+function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduct, bulkImport, commitSmartImport, importState, setImportState }) {
   const [showManualImport, setShowManualImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [importMsg, setImportMsg] = useState('');
@@ -1831,7 +1835,7 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
         />
       )}
 
-      <SmartImportPanel aisles={aisles} commitSmartImport={commitSmartImport} />
+      <SmartImportPanel aisles={aisles} commitSmartImport={commitSmartImport} importState={importState} setImportState={setImportState} />
 
       <button onClick={() => setShowManualImport((v) => !v)} className="flex items-center gap-2 text-sm font-semibold mb-4 mt-2" style={{ color: MUTED }}>
         <ClipboardPaste size={13} />
