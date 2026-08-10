@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X, Move, ChefHat, Settings, ShieldAlert } from 'lucide-react';
 
 const INK = '#2B241A';
@@ -185,6 +186,66 @@ function classifyOffline(existingCategories, rawText) {
 
     return { name, category, price };
   });
+}
+
+// ---- Real spreadsheet upload ----
+// Every store's inventory export uses its own column names and its
+// own aisle/category labels — this reads the actual file (CSV or
+// Excel) and, when it finds a category-like column, trusts the
+// store's own naming instead of guessing. Only falls back to the
+// keyword classifier above when there's no category data to read.
+const HEADER_ALIASES = {
+  name: ['name', 'item', 'product', 'description', 'item name', 'product name'],
+  price: ['price', 'cost', 'retail', 'retail price', 'unit price'],
+  category: ['category', 'aisle', 'department', 'section', 'dept', 'aisle name', 'category name'],
+};
+
+function findColumn(headers, kind) {
+  const aliases = HEADER_ALIASES[kind];
+  const lowerHeaders = headers.map((h) => (h || '').toString().trim().toLowerCase());
+  for (const alias of aliases) {
+    const idx = lowerHeaders.indexOf(alias);
+    if (idx !== -1) return idx;
+  }
+  // fall back to a loose "contains" match if no exact header hit
+  for (const alias of aliases) {
+    const idx = lowerHeaders.findIndex((h) => h.includes(alias));
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+async function parseSpreadsheetFile(file, existingCategories) {
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+  if (rows.length === 0) return { items: [], usedOwnCategories: false };
+
+  const headers = rows[0];
+  const nameIdx = findColumn(headers, 'name');
+  const priceIdx = findColumn(headers, 'price');
+  const categoryIdx = findColumn(headers, 'category');
+  const dataRows = rows.slice(1).filter((r) => r.some((cell) => String(cell).trim()));
+
+  // No recognizable header row at all — treat column A as the name
+  // and fall back to the offline keyword classifier, same as a
+  // plain paste would.
+  if (nameIdx === -1 && categoryIdx === -1) {
+    const rawText = dataRows.map((r) => r[0]).join('\n');
+    return { items: classifyOffline(existingCategories, rawText), usedOwnCategories: false };
+  }
+
+  const items = dataRows.map((r) => {
+    const rawName = nameIdx !== -1 ? r[nameIdx] : r[0];
+    const name = titleCase(String(rawName || '').trim());
+    const priceRaw = priceIdx !== -1 ? String(r[priceIdx]).replace(/[^0-9.]/g, '') : '';
+    const price = priceRaw ? parseFloat(priceRaw) : null;
+    const category = categoryIdx !== -1 ? String(r[categoryIdx] || '').trim() || null : null;
+    return { name, category, price };
+  }).filter((it) => it.name);
+
+  return { items, usedOwnCategories: categoryIdx !== -1 };
 }
 
 function AuthScreen({ onAuthed, lang, setLang }) {
@@ -1634,6 +1695,9 @@ function AislesTab({ aisles, renameAisle, deleteAisle, addAisle }) {
 
 function SmartImportPanel({ aisles, commitSmartImport, importState, setImportState }) {
   const { rawText, status, reviewItems, errorMsg, resultMsg } = importState;
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
 
   const knownCategories = Object.keys(CATEGORY_KEYWORDS);
   const categoryOptions = [...new Set([...aisles.map((a) => a.name), ...knownCategories])];
@@ -1647,7 +1711,32 @@ function SmartImportPanel({ aisles, commitSmartImport, importState, setImportSta
       setImportState({ errorMsg: 'Nothing to sort — check the pasted text.' });
       return;
     }
-    setImportState({ errorMsg: '', reviewItems: items, status: 'review' });
+    setImportState({ errorMsg: '', resultMsg: '', reviewItems: items, status: 'review' });
+  };
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setUploading(true);
+    setImportState({ errorMsg: '' });
+    try {
+      const existing = aisles.map((a) => a.name);
+      const { items, usedOwnCategories } = await parseSpreadsheetFile(file, existing);
+      if (items.length === 0) {
+        setImportState({ errorMsg: "Couldn't find any rows in that file — check it has a header row and at least one product." });
+      } else {
+        setImportState({
+          errorMsg: '',
+          reviewItems: items,
+          status: 'review',
+          resultMsg: usedOwnCategories
+            ? "Used your file's own category column — most items are already sorted."
+            : '',
+        });
+      }
+    } catch (e) {
+      setImportState({ errorMsg: "Couldn't read that file. Make sure it's a .csv, .xlsx, or .xls export." });
+    }
+    setUploading(false);
   };
 
   const updateReviewItem = (idx, patch) => {
@@ -1681,17 +1770,55 @@ function SmartImportPanel({ aisles, commitSmartImport, importState, setImportSta
         <span style={{ color: ORANGE, fontSize: 11, fontWeight: 800, letterSpacing: 1.5 }}>SMART IMPORT</span>
       </div>
       <p className="text-xs mb-3" style={{ color: '#D9CBAE' }}>
-        Paste your raw product list — just names, or "name, price" — and it's automatically sorted into aisles.
-        Anything it doesn't recognize is flagged for you to assign — type a brand new aisle name if you need one,
-        no need to leave this screen.
+        Upload your real inventory file — if it already has its own aisle, department, or category column, we use
+        your exact naming instead of guessing. No category column? We'll sort it for you automatically.
       </p>
 
       {status === 'idle' && (
         <>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file) handleFile(file);
+            }}
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-lg mb-3 flex flex-col items-center justify-center cursor-pointer"
+            style={{
+              border: `2px dashed ${dragOver ? ORANGE : '#5A6B5E'}`,
+              backgroundColor: dragOver ? 'rgba(226,137,31,0.1)' : 'rgba(255,255,255,0.03)',
+              padding: 28,
+            }}
+          >
+            {uploading ? (
+              <>
+                <Loader2 size={22} className="animate-spin" color={ORANGE} />
+                <span className="text-xs mt-2" style={{ color: '#D9CBAE' }}>Reading file…</span>
+              </>
+            ) : (
+              <>
+                <ClipboardPaste size={22} color={ORANGE} />
+                <span className="text-sm font-bold mt-2" style={{ color: CREAM }}>Drop your spreadsheet here</span>
+                <span className="text-xs mt-1" style={{ color: '#8C9C8F' }}>or click to choose a file — .csv, .xlsx, or .xls</span>
+              </>
+            )}
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls"
+            onChange={(e) => handleFile(e.target.files?.[0])}
+            style={{ display: 'none' }}
+          />
+
+          <p className="text-xs mb-2" style={{ color: '#8C9C8F' }}>— or paste it as plain text instead —</p>
           <textarea
             value={rawText}
             onChange={(e) => setImportState({ rawText: e.target.value })}
-            rows={6}
+            rows={5}
             placeholder={'Whole milk, 3.49\nSourdough bread\nBananas, 0.59\nCheddar cheese, 4.29\n...'}
             className="w-full rounded-lg border px-3 py-2 text-sm outline-none mb-2"
             style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
@@ -1709,6 +1836,9 @@ function SmartImportPanel({ aisles, commitSmartImport, importState, setImportSta
 
       {(status === 'review' || status === 'saving') && (
         <>
+          {resultMsg && (
+            <p className="text-xs mb-2" style={{ color: '#B8E0A0' }}>{resultMsg}</p>
+          )}
           {unsortedCount > 0 && (
             <p className="text-xs mb-2" style={{ color: '#F2C18D' }}>
               {unsortedCount} item{unsortedCount === 1 ? "wasn't" : "s weren't"} recognized — type or pick a category
@@ -1763,7 +1893,7 @@ function SmartImportPanel({ aisles, commitSmartImport, importState, setImportSta
               {status === 'saving' && <Loader2 size={14} className="animate-spin" />}
               {status === 'saving' ? 'Saving…' : `Looks good — save ${reviewItems.length} product${reviewItems.length === 1 ? '' : 's'}`}
             </button>
-            <button onClick={() => setImportState({ status: 'idle', reviewItems: [] })} className="text-xs" style={{ color: '#D9CBAE' }}>
+            <button onClick={() => setImportState({ status: 'idle', reviewItems: [], resultMsg: '', errorMsg: '' })} className="text-xs" style={{ color: '#D9CBAE' }}>
               Start over
             </button>
           </div>
