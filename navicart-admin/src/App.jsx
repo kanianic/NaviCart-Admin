@@ -63,58 +63,59 @@ async function authRequest(grantPath, email, password) {
   return data;
 }
 
-// ---- AI aisle classification ----
-// Sends a batch of raw product lines to Claude and gets back each
-// item cleaned up, priced, and sorted into a category — reusing the
-// store's existing aisles where they fit, inventing new ones only
-// when genuinely needed.
-async function classifyBatch(existingCategories, lines) {
-  const systemPrompt = `You are helping a grocery store owner organize a raw product list into store aisles for a shopping app.
-Existing categories at this store: ${existingCategories.length ? existingCategories.join(', ') : '(none yet — define a sensible standard set as you go)'}.
-Rules:
-- Reuse an existing category name exactly when it reasonably fits.
-- Only invent a new category when truly necessary. Keep new category names short and store-aisle-like (e.g. Produce, Dairy, Frozen, Household, Beverages).
-- Clean up each item's name into a normal product name (fix casing, drop stray bullets/quantities) but keep it recognizable.
-- If a line includes a price (e.g. "Milk, 3.49" or "Milk $3.49"), extract it as a number; otherwise price is null.
-Respond with ONLY valid JSON, no markdown fences, no commentary, in exactly this shape:
-{"items":[{"name":"Milk","category":"Dairy","price":3.49}]}`;
+// ---- Free, offline aisle classification ----
+// Matches each pasted line against a built-in dictionary of common
+// grocery items, no external API or paid key required. Anything
+// not recognized comes back with category: null so the owner can
+// assign it manually in the review screen.
+const CATEGORY_KEYWORDS = {
+  Produce: ['lettuce', 'tomato', 'banana', 'apple', 'onion', 'avocado', 'potato', 'carrot', 'pepper', 'grape',
+    'orange', 'lemon', 'lime', 'garlic', 'broccoli', 'spinach', 'cucumber', 'celery', 'mushroom', 'berries',
+    'strawberr', 'blueberr', 'melon', 'peach', 'pear', 'mango', 'corn'],
+  Bakery: ['bread', 'bagel', 'tortilla', 'muffin', 'croissant', 'roll', 'bun', 'cake', 'donut', 'pastry', 'pita'],
+  Dairy: ['milk', 'cheese', 'yogurt', 'egg', 'butter', 'cream cheese', 'sour cream', 'cottage cheese', 'half and half'],
+  'Meat & Seafood': ['chicken', 'beef', 'fish', 'bacon', 'pork', 'turkey', 'sausage', 'ham', 'steak', 'shrimp',
+    'salmon', 'ground beef', 'ground turkey', 'chix'],
+  'Pasta & Grains': ['pasta', 'rice', 'cereal', 'bean', 'flour', 'spaghetti', 'noodle', 'oat', 'quinoa', 'sauce',
+    'marinara', 'peanut butter', 'jelly', 'jam', 'honey'],
+  Snacks: ['chip', 'soda', 'cookie', 'cracker', 'candy', 'salsa', 'popcorn', 'pretzel', 'granola bar', 'nuts',
+    'coke', 'sprite', 'pepsi', 'cola'],
+  Frozen: ['frozen', 'ice cream', 'popsicle'],
+  Beverages: ['juice', 'coffee', 'tea', 'water', 'sparkling', 'soda water', 'gatorade', 'energy drink'],
+  Household: ['paper towel', 'toilet paper', 'dish soap', 'detergent', 'laundry', 'foil', 'ziploc', 'trash bag',
+    'sponge', 'cleaner', 'bleach'],
+  'Health & Beauty': ['shampoo', 'toothpaste', 'deodorant', 'soap', 'vitamin', 'lotion', 'razor', 'floss'],
+  Pets: ['dog food', 'cat food', 'cat litter', 'pet '],
+};
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: lines.join('\n') }],
-    }),
-  });
-  const data = await res.json();
-  const text = (data.content || []).map((b) => b.text || '').join('');
-  const clean = text.replace(/```json|```/g, '').trim();
-  const parsed = JSON.parse(clean);
-  return parsed.items || [];
-}
-
-async function classifyItems(existingCategories, rawText, onProgress) {
+function classifyOffline(existingCategories, rawText) {
   const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
-  const BATCH_SIZE = 20;
-  const batches = [];
-  for (let i = 0; i < lines.length; i += BATCH_SIZE) batches.push(lines.slice(i, i + BATCH_SIZE));
+  return lines.map((line) => {
+    const priceMatch = line.match(/\$?(\d+\.\d{1,2})/);
+    const price = priceMatch ? parseFloat(priceMatch[1]) : null;
 
-  let knownCategories = [...existingCategories];
-  const allItems = [];
-  for (let i = 0; i < batches.length; i++) {
-    if (onProgress) onProgress(i, batches.length);
-    const items = await classifyBatch(knownCategories, batches[i]);
-    items.forEach((it) => {
-      if (it.category && !knownCategories.some((c) => c.toLowerCase() === it.category.toLowerCase())) {
-        knownCategories.push(it.category);
+    let name = line
+      .replace(/^[\s\-\*\u2022\d.)]+/, '')
+      .replace(/,?\s*\$?\d+\.\d{1,2}\s*$/, '')
+      .replace(/\s+x\s*\d+$/i, '')
+      .trim();
+    name = name.replace(/\b\w/g, (c) => c.toUpperCase());
+
+    const lower = name.toLowerCase();
+    let category = null;
+
+    for (const existing of existingCategories) {
+      const kws = CATEGORY_KEYWORDS[existing];
+      if (kws && kws.some((kw) => lower.includes(kw))) { category = existing; break; }
+    }
+    if (!category) {
+      for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+        if (kws.some((kw) => lower.includes(kw))) { category = cat; break; }
       }
-    });
-    allItems.push(...items);
-  }
-  return allItems;
+    }
+
+    return { name, category, price };
+  });
 }
 
 function AuthScreen({ onAuthed }) {
@@ -813,32 +814,26 @@ function AislesTab({ aisles, renameAisle, deleteAisle, addAisle }) {
 
 function SmartImportPanel({ aisles, commitSmartImport }) {
   const [rawText, setRawText] = useState('');
-  const [status, setStatus] = useState('idle'); // idle | classifying | review | saving | done | error
-  const [progress, setProgress] = useState(null); // {done, total}
+  const [status, setStatus] = useState('idle'); // idle | review | saving | done
   const [reviewItems, setReviewItems] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [resultMsg, setResultMsg] = useState('');
 
-  const categoryOptions = [...new Set([...aisles.map((a) => a.name), ...reviewItems.map((i) => i.category)])];
+  const knownCategories = Object.keys(CATEGORY_KEYWORDS);
+  const categoryOptions = [...new Set([...aisles.map((a) => a.name), ...knownCategories])];
+  const unsortedCount = reviewItems.filter((i) => !i.category).length;
 
-  const runClassify = async () => {
+  const runClassify = () => {
     if (!rawText.trim()) return;
-    setStatus('classifying');
-    setErrorMsg('');
-    try {
-      const existing = aisles.map((a) => a.name);
-      const items = await classifyItems(existing, rawText, (done, total) => setProgress({ done, total }));
-      if (items.length === 0) {
-        setErrorMsg('Nothing came back — try pasting the list again.');
-        setStatus('idle');
-        return;
-      }
-      setReviewItems(items);
-      setStatus('review');
-    } catch (e) {
-      setErrorMsg('Classification failed — check your connection and try again.');
-      setStatus('idle');
+    const existing = aisles.map((a) => a.name);
+    const items = classifyOffline(existing, rawText);
+    if (items.length === 0) {
+      setErrorMsg('Nothing to sort — check the pasted text.');
+      return;
     }
+    setErrorMsg('');
+    setReviewItems(items);
+    setStatus('review');
   };
 
   const updateReviewItem = (idx, patch) => {
@@ -872,11 +867,11 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
         <span style={{ color: ORANGE, fontSize: 11, fontWeight: 800, letterSpacing: 1.5 }}>SMART IMPORT</span>
       </div>
       <p className="text-xs mb-3" style={{ color: '#D9CBAE' }}>
-        Paste your raw product list — just names, or "name, price" — and AI sorts everything into aisles for you,
-        creating new ones automatically if none of yours fit.
+        Paste your raw product list — just names, or "name, price" — and it's automatically sorted into aisles.
+        Anything it doesn't recognize is flagged for you to assign in one click.
       </p>
 
-      {(status === 'idle' || status === 'classifying') && (
+      {status === 'idle' && (
         <>
           <textarea
             value={rawText}
@@ -885,18 +880,13 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
             placeholder={'Whole milk, 3.49\nSourdough bread\nBananas, 0.59\nCheddar cheese, 4.29\n...'}
             className="w-full rounded-lg border px-3 py-2 text-sm outline-none mb-2"
             style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
-            disabled={status === 'classifying'}
           />
           <button
             onClick={runClassify}
-            disabled={status === 'classifying'}
-            className="rounded-lg px-4 py-2.5 text-sm font-bold flex items-center gap-2"
+            className="rounded-lg px-4 py-2.5 text-sm font-bold"
             style={{ backgroundColor: ORANGE, color: BG }}
           >
-            {status === 'classifying' && <Loader2 size={14} className="animate-spin" />}
-            {status === 'classifying'
-              ? progress ? `Classifying batch ${progress.done + 1} of ${progress.total}…` : 'Classifying…'
-              : 'Auto-classify with AI'}
+            Sort into aisles
           </button>
           {errorMsg && <p className="text-xs mt-2" style={{ color: '#E8A67D' }}>{errorMsg}</p>}
         </>
@@ -904,9 +894,19 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
 
       {(status === 'review' || status === 'saving') && (
         <>
+          {unsortedCount > 0 && (
+            <p className="text-xs mb-2" style={{ color: '#F2C18D' }}>
+              {unsortedCount} item{unsortedCount === 1 ? "wasn't" : "s weren't"} recognized — pick a category for
+              {unsortedCount === 1 ? ' it' : ' them'} below before saving.
+            </p>
+          )}
           <div className="rounded-lg overflow-hidden mb-3" style={{ backgroundColor: CREAM }}>
             {reviewItems.map((item, idx) => (
-              <div key={idx} className="flex items-center gap-2 px-3 py-2 border-b" style={{ borderColor: '#EDE6D4' }}>
+              <div
+                key={idx}
+                className="flex items-center gap-2 px-3 py-2 border-b"
+                style={{ borderColor: '#EDE6D4', backgroundColor: item.category ? 'transparent' : '#FBEAD3' }}
+              >
                 <input
                   value={item.name}
                   onChange={(e) => updateReviewItem(idx, { name: e.target.value })}
@@ -914,11 +914,12 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
                   style={{ color: INK }}
                 />
                 <select
-                  value={item.category}
+                  value={item.category || ''}
                   onChange={(e) => updateReviewItem(idx, { category: e.target.value })}
                   className="text-xs rounded px-2 py-1 border outline-none"
-                  style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+                  style={{ borderColor: item.category ? '#E5DDCB' : ORANGE, color: INK, backgroundColor: '#fff' }}
                 >
+                  <option value="" disabled>Choose category…</option>
                   {categoryOptions.map((c) => (
                     <option key={c} value={c}>{c}{!aisles.some((a) => a.name.toLowerCase() === c.toLowerCase()) ? ' (new)' : ''}</option>
                   ))}
@@ -939,9 +940,9 @@ function SmartImportPanel({ aisles, commitSmartImport }) {
           <div className="flex items-center gap-3">
             <button
               onClick={save}
-              disabled={status === 'saving' || reviewItems.length === 0}
+              disabled={status === 'saving' || reviewItems.length === 0 || unsortedCount > 0}
               className="rounded-lg px-4 py-2.5 text-sm font-bold flex items-center gap-2"
-              style={{ backgroundColor: GREEN, color: BG }}
+              style={{ backgroundColor: GREEN, color: BG, opacity: unsortedCount > 0 ? 0.5 : 1 }}
             >
               {status === 'saving' && <Loader2 size={14} className="animate-spin" />}
               {status === 'saving' ? 'Saving…' : `Looks good — save ${reviewItems.length} product${reviewItems.length === 1 ? '' : 's'}`}
