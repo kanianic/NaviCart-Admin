@@ -63,6 +63,60 @@ async function authRequest(grantPath, email, password) {
   return data;
 }
 
+// ---- AI aisle classification ----
+// Sends a batch of raw product lines to Claude and gets back each
+// item cleaned up, priced, and sorted into a category — reusing the
+// store's existing aisles where they fit, inventing new ones only
+// when genuinely needed.
+async function classifyBatch(existingCategories, lines) {
+  const systemPrompt = `You are helping a grocery store owner organize a raw product list into store aisles for a shopping app.
+Existing categories at this store: ${existingCategories.length ? existingCategories.join(', ') : '(none yet — define a sensible standard set as you go)'}.
+Rules:
+- Reuse an existing category name exactly when it reasonably fits.
+- Only invent a new category when truly necessary. Keep new category names short and store-aisle-like (e.g. Produce, Dairy, Frozen, Household, Beverages).
+- Clean up each item's name into a normal product name (fix casing, drop stray bullets/quantities) but keep it recognizable.
+- If a line includes a price (e.g. "Milk, 3.49" or "Milk $3.49"), extract it as a number; otherwise price is null.
+Respond with ONLY valid JSON, no markdown fences, no commentary, in exactly this shape:
+{"items":[{"name":"Milk","category":"Dairy","price":3.49}]}`;
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: lines.join('\n') }],
+    }),
+  });
+  const data = await res.json();
+  const text = (data.content || []).map((b) => b.text || '').join('');
+  const clean = text.replace(/```json|```/g, '').trim();
+  const parsed = JSON.parse(clean);
+  return parsed.items || [];
+}
+
+async function classifyItems(existingCategories, rawText, onProgress) {
+  const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
+  const BATCH_SIZE = 20;
+  const batches = [];
+  for (let i = 0; i < lines.length; i += BATCH_SIZE) batches.push(lines.slice(i, i + BATCH_SIZE));
+
+  let knownCategories = [...existingCategories];
+  const allItems = [];
+  for (let i = 0; i < batches.length; i++) {
+    if (onProgress) onProgress(i, batches.length);
+    const items = await classifyBatch(knownCategories, batches[i]);
+    items.forEach((it) => {
+      if (it.category && !knownCategories.some((c) => c.toLowerCase() === it.category.toLowerCase())) {
+        knownCategories.push(it.category);
+      }
+    });
+    allItems.push(...items);
+  }
+  return allItems;
+}
+
 function AuthScreen({ onAuthed }) {
   const [mode, setMode] = useState('login'); // login | signup
   const [email, setEmail] = useState('');
@@ -395,6 +449,60 @@ export default function StoreAdmin() {
     }
   }
 
+  // Commits AI-reviewed items: creates any brand-new categories as
+  // real aisles first, then saves every product against its
+  // resolved aisle number.
+  async function commitSmartImport(reviewItems) {
+    setSync('saving');
+    try {
+      const existingNames = aisles.map((a) => a.name.toLowerCase());
+      const neededNewCats = [...new Set(reviewItems.map((i) => i.category))].filter(
+        (c) => !existingNames.includes(c.toLowerCase())
+      );
+
+      let nextNum = aisles.length ? Math.max(...aisles.map((a) => a.number)) + 1 : 1;
+      const newAisleRows = [];
+      for (const catName of neededNewCats) {
+        const rows = await sb('aisles', {
+          method: 'POST',
+          body: JSON.stringify({ store_id: store.id, number: nextNum, name: catName }),
+        });
+        newAisleRows.push(rows[0]);
+        nextNum++;
+      }
+
+      const nameToNumber = {};
+      [...aisles, ...newAisleRows].forEach((a) => { nameToNumber[a.name.toLowerCase()] = a.number; });
+
+      const rowsToUpsert = reviewItems.map((item) => ({
+        store_id: store.id,
+        key: productKey(item.name),
+        label: item.name,
+        aisle_number: nameToNumber[item.category.toLowerCase()] ?? null,
+        price: item.price || 0,
+        stock: 'in',
+      }));
+
+      const saved = await sb('products?on_conflict=store_id,key', {
+        method: 'POST',
+        body: JSON.stringify(rowsToUpsert),
+        headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      });
+
+      setAisles((prev) => [...prev, ...newAisleRows].sort((a, b) => a.number - b.number));
+      setProducts((prev) => {
+        const byKey = new Map(prev.map((p) => [p.key, p]));
+        (saved || []).forEach((p) => byKey.set(p.key, p));
+        return Array.from(byKey.values());
+      });
+      setSync('idle');
+      return { newAisleCount: newAisleRows.length, productCount: (saved || []).length };
+    } catch (e) {
+      setSync('error');
+      throw e;
+    }
+  }
+
   return (
     <div className="min-h-screen w-full" style={{ backgroundColor: BG, fontFamily: 'system-ui, sans-serif' }}>
       {phase === 'auth' && <AuthScreen onAuthed={handleAuthed} />}
@@ -435,6 +543,7 @@ export default function StoreAdmin() {
           updateProduct={updateProduct}
           deleteProduct={deleteProduct}
           bulkImport={bulkImport}
+          commitSmartImport={commitSmartImport}
           addPromo={addPromo}
           deletePromo={deletePromo}
         />
@@ -520,7 +629,7 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
 
 function EditorShell({
   store, aisles, products, promos, tab, setTab, onBack, sync,
-  addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport,
+  addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport, commitSmartImport,
   addPromo, deletePromo,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
@@ -567,7 +676,7 @@ function EditorShell({
       <div className="flex-1 p-6 md:p-10" style={{ backgroundColor: CREAM }}>
         {tab === 'aisles' && <AislesTab aisles={aisles} renameAisle={renameAisle} deleteAisle={deleteAisle} addAisle={addAisle} />}
         {tab === 'products' && (
-          <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} />
+          <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} commitSmartImport={commitSmartImport} />
         )}
         {tab === 'deals' && (
           <DealsTab aisles={aisles} promos={promos} addPromo={addPromo} deletePromo={deletePromo} />
@@ -702,8 +811,161 @@ function AislesTab({ aisles, renameAisle, deleteAisle, addAisle }) {
   );
 }
 
-function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduct, bulkImport }) {
-  const [showImport, setShowImport] = useState(false);
+function SmartImportPanel({ aisles, commitSmartImport }) {
+  const [rawText, setRawText] = useState('');
+  const [status, setStatus] = useState('idle'); // idle | classifying | review | saving | done | error
+  const [progress, setProgress] = useState(null); // {done, total}
+  const [reviewItems, setReviewItems] = useState([]);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [resultMsg, setResultMsg] = useState('');
+
+  const categoryOptions = [...new Set([...aisles.map((a) => a.name), ...reviewItems.map((i) => i.category)])];
+
+  const runClassify = async () => {
+    if (!rawText.trim()) return;
+    setStatus('classifying');
+    setErrorMsg('');
+    try {
+      const existing = aisles.map((a) => a.name);
+      const items = await classifyItems(existing, rawText, (done, total) => setProgress({ done, total }));
+      if (items.length === 0) {
+        setErrorMsg('Nothing came back — try pasting the list again.');
+        setStatus('idle');
+        return;
+      }
+      setReviewItems(items);
+      setStatus('review');
+    } catch (e) {
+      setErrorMsg('Classification failed — check your connection and try again.');
+      setStatus('idle');
+    }
+  };
+
+  const updateReviewItem = (idx, patch) => {
+    setReviewItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+  };
+  const removeReviewItem = (idx) => {
+    setReviewItems((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const save = async () => {
+    setStatus('saving');
+    try {
+      const result = await commitSmartImport(reviewItems);
+      setResultMsg(
+        `Saved ${result.productCount} product${result.productCount === 1 ? '' : 's'}` +
+          (result.newAisleCount ? ` and created ${result.newAisleCount} new aisle${result.newAisleCount === 1 ? '' : 's'}.` : '.')
+      );
+      setStatus('done');
+      setRawText('');
+      setReviewItems([]);
+    } catch (e) {
+      setErrorMsg('Saving failed — check your connection and try again.');
+      setStatus('review');
+    }
+  };
+
+  return (
+    <div className="rounded-lg p-4 mb-4" style={{ backgroundColor: '#2B3D2F' }}>
+      <div className="flex items-center gap-2 mb-1">
+        <ClipboardPaste size={15} color={ORANGE} />
+        <span style={{ color: ORANGE, fontSize: 11, fontWeight: 800, letterSpacing: 1.5 }}>SMART IMPORT</span>
+      </div>
+      <p className="text-xs mb-3" style={{ color: '#D9CBAE' }}>
+        Paste your raw product list — just names, or "name, price" — and AI sorts everything into aisles for you,
+        creating new ones automatically if none of yours fit.
+      </p>
+
+      {(status === 'idle' || status === 'classifying') && (
+        <>
+          <textarea
+            value={rawText}
+            onChange={(e) => setRawText(e.target.value)}
+            rows={6}
+            placeholder={'Whole milk, 3.49\nSourdough bread\nBananas, 0.59\nCheddar cheese, 4.29\n...'}
+            className="w-full rounded-lg border px-3 py-2 text-sm outline-none mb-2"
+            style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+            disabled={status === 'classifying'}
+          />
+          <button
+            onClick={runClassify}
+            disabled={status === 'classifying'}
+            className="rounded-lg px-4 py-2.5 text-sm font-bold flex items-center gap-2"
+            style={{ backgroundColor: ORANGE, color: BG }}
+          >
+            {status === 'classifying' && <Loader2 size={14} className="animate-spin" />}
+            {status === 'classifying'
+              ? progress ? `Classifying batch ${progress.done + 1} of ${progress.total}…` : 'Classifying…'
+              : 'Auto-classify with AI'}
+          </button>
+          {errorMsg && <p className="text-xs mt-2" style={{ color: '#E8A67D' }}>{errorMsg}</p>}
+        </>
+      )}
+
+      {(status === 'review' || status === 'saving') && (
+        <>
+          <div className="rounded-lg overflow-hidden mb-3" style={{ backgroundColor: CREAM }}>
+            {reviewItems.map((item, idx) => (
+              <div key={idx} className="flex items-center gap-2 px-3 py-2 border-b" style={{ borderColor: '#EDE6D4' }}>
+                <input
+                  value={item.name}
+                  onChange={(e) => updateReviewItem(idx, { name: e.target.value })}
+                  className="flex-1 text-sm bg-transparent outline-none"
+                  style={{ color: INK }}
+                />
+                <select
+                  value={item.category}
+                  onChange={(e) => updateReviewItem(idx, { category: e.target.value })}
+                  className="text-xs rounded px-2 py-1 border outline-none"
+                  style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+                >
+                  {categoryOptions.map((c) => (
+                    <option key={c} value={c}>{c}{!aisles.some((a) => a.name.toLowerCase() === c.toLowerCase()) ? ' (new)' : ''}</option>
+                  ))}
+                </select>
+                <div className="flex items-center gap-1 font-mono text-sm" style={{ color: INK }}>
+                  $<input
+                    value={item.price ?? ''}
+                    onChange={(e) => updateReviewItem(idx, { price: parseFloat(e.target.value) || 0 })}
+                    className="w-14 bg-transparent outline-none"
+                  />
+                </div>
+                <button onClick={() => removeReviewItem(idx)}>
+                  <Trash2 size={13} color="#C7B99A" />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={save}
+              disabled={status === 'saving' || reviewItems.length === 0}
+              className="rounded-lg px-4 py-2.5 text-sm font-bold flex items-center gap-2"
+              style={{ backgroundColor: GREEN, color: BG }}
+            >
+              {status === 'saving' && <Loader2 size={14} className="animate-spin" />}
+              {status === 'saving' ? 'Saving…' : `Looks good — save ${reviewItems.length} product${reviewItems.length === 1 ? '' : 's'}`}
+            </button>
+            <button onClick={() => { setStatus('idle'); setReviewItems([]); }} className="text-xs" style={{ color: '#D9CBAE' }}>
+              Start over
+            </button>
+          </div>
+          {errorMsg && <p className="text-xs mt-2" style={{ color: '#E8A67D' }}>{errorMsg}</p>}
+        </>
+      )}
+
+      {status === 'done' && (
+        <div className="flex items-center gap-2">
+          <p className="text-sm" style={{ color: '#B8E0A0' }}>{resultMsg}</p>
+          <button onClick={() => setStatus('idle')} className="text-xs underline" style={{ color: '#D9CBAE' }}>Import more</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduct, bulkImport, commitSmartImport }) {
+  const [showManualImport, setShowManualImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [importMsg, setImportMsg] = useState('');
   const [importing, setImporting] = useState(false);
@@ -723,15 +985,17 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
       <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Product catalog</h3>
       <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>Each card below is a live shelf tag — edit it and shoppers see the change immediately.</p>
 
-      <button onClick={() => setShowImport((v) => !v)} className="flex items-center gap-2 text-sm font-semibold mb-4" style={{ color: '#4C6B45' }}>
-        <ClipboardPaste size={15} />
-        {showImport ? 'Hide spreadsheet import' : 'Paste in from a spreadsheet'}
+      <SmartImportPanel aisles={aisles} commitSmartImport={commitSmartImport} />
+
+      <button onClick={() => setShowManualImport((v) => !v)} className="flex items-center gap-2 text-sm font-semibold mb-4 mt-2" style={{ color: MUTED }}>
+        <ClipboardPaste size={13} />
+        {showManualImport ? 'Hide manual import' : 'Prefer to assign aisles yourself? Manual import'}
       </button>
 
-      {showImport && (
+      {showManualImport && (
         <div className="rounded-lg p-4 mb-6" style={{ backgroundColor: PAPER }}>
           <p className="text-xs mb-2" style={{ color: '#8C7A4A' }}>
-            Copy cells straight from Excel or Google Sheets and paste below — one product per line:{' '}
+            One product per line, with the aisle number you choose:{' '}
             <span className="font-mono">name, aisle number, price, stock (in/low/out)</span>
           </p>
           <textarea
