@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff } from 'lucide-react';
+import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin } from 'lucide-react';
 
 const INK = '#2B241A';
 const BG = '#1E2B22';
@@ -655,6 +655,7 @@ function EditorShell({
             { id: 'aisles', label: 'Aisles', icon: LayoutGrid },
             { id: 'products', label: 'Products', icon: Tags },
             { id: 'deals', label: 'Deals', icon: Tag },
+            { id: 'insights', label: 'Insights', icon: BarChart3 },
             { id: 'preview', label: 'Shopper preview', icon: Eye },
           ].map((t) => (
             <button
@@ -682,6 +683,7 @@ function EditorShell({
         {tab === 'deals' && (
           <DealsTab aisles={aisles} promos={promos} addPromo={addPromo} deletePromo={deletePromo} />
         )}
+        {tab === 'insights' && <InsightsTab store={store} aisles={aisles} addProduct={addProduct} />}
         {tab === 'preview' && <PreviewTab aisles={aisles} products={products} unmapped={unmapped} />}
       </div>
     </div>
@@ -1104,6 +1106,145 @@ function ProductTag({ product, aisles, updateProduct, deleteProduct }) {
           <span style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: stock.color, display: 'inline-block' }} />
           {stock.label}
         </button>
+      </div>
+    </div>
+  );
+}
+
+function InsightsTab({ store, aisles, addProduct }) {
+  const [status, setStatus] = useState('loading'); // loading | ready | error
+  const [events, setEvents] = useState([]);
+  const [addedKeys, setAddedKeys] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setStatus('loading');
+      try {
+        const rows = await sb(`events?store_id=eq.${store.id}&select=*&order=created_at.desc&limit=2000`);
+        if (!cancelled) { setEvents(rows || []); setStatus('ready'); }
+      } catch (e) {
+        if (!cancelled) setStatus('error');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [store.id]);
+
+  const countBy = (arr, key) => {
+    const map = {};
+    arr.forEach((e) => { const k = e[key]; if (k == null) return; map[k] = (map[k] || 0) + 1; });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  };
+
+  const searches = events.filter((e) => e.type === 'search');
+  const notFound = events.filter((e) => e.type === 'not_found');
+  const aisleVisits = events.filter((e) => e.type === 'aisle_visit');
+
+  const topSearched = countBy(searches, 'item_name').slice(0, 8);
+  const topNotFound = countBy(notFound, 'item_name').slice(0, 8);
+  const topAisles = countBy(aisleVisits, 'aisle_number').slice(0, 8);
+  const aisleName = (num) => aisles.find((a) => String(a.number) === String(num))?.name || `Aisle ${num}`;
+
+  const handleAdd = (name) => {
+    addProduct(name, aisles[0]?.number ?? null, 0);
+    setAddedKeys((prev) => [...prev, name]);
+  };
+
+  if (status === 'loading') {
+    return <div className="flex items-center gap-2 text-sm" style={{ color: '#8C7A4A' }}><Loader2 size={14} className="animate-spin" /> Loading usage data…</div>;
+  }
+  if (status === 'error') {
+    return <p className="text-sm" style={{ color: RED }}>Could not load usage data. Try again.</p>;
+  }
+
+  return (
+    <div className="max-w-2xl">
+      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Insights</h3>
+      <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>
+        Real usage from shoppers in the app — this fills in on its own as people shop, nothing to set up.
+      </p>
+
+      {events.length === 0 ? (
+        <p className="text-sm italic" style={{ color: '#B4A87F' }}>
+          No activity yet. Once shoppers start using the app for this store, real search and traffic data shows up here.
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-3 mb-8">
+            <StatCard label="Searches" value={searches.length} />
+            <StatCard label="Aisles visited" value={aisleVisits.length} />
+            <StatCard label="Items you don't carry" value={new Set(notFound.map((e) => e.item_name)).size} />
+          </div>
+
+          <InsightSection icon={Search} label="TOP SEARCHED">
+            {topSearched.length === 0 ? (
+              <p className="text-xs italic" style={{ color: '#B4A87F' }}>No searches yet.</p>
+            ) : (
+              topSearched.map(([name, count]) => (
+                <div key={name} className="flex items-center py-1.5">
+                  <span className="flex-1 text-sm" style={{ color: INK }}>{name}</span>
+                  <span className="text-xs font-bold" style={{ color: '#8C7A4A' }}>{count}×</span>
+                </div>
+              ))
+            )}
+          </InsightSection>
+
+          <InsightSection icon={PackageX} label="SHOPPERS WANTED, YOU DON'T CARRY">
+            {topNotFound.length === 0 ? (
+              <p className="text-xs italic" style={{ color: '#B4A87F' }}>Nothing missing — nice.</p>
+            ) : (
+              topNotFound.map(([name, count]) => (
+                <div key={name} className="flex items-center py-1.5">
+                  <span className="flex-1 text-sm" style={{ color: INK }}>{name}</span>
+                  <span className="text-xs font-bold mr-3" style={{ color: '#8C7A4A' }}>{count}×</span>
+                  {addedKeys.includes(name) ? (
+                    <span className="text-xs font-bold" style={{ color: GREEN }}>Added</span>
+                  ) : (
+                    <button onClick={() => handleAdd(name)} className="flex items-center gap-1 text-xs font-bold" style={{ color: '#4C6B45' }}>
+                      <Plus size={13} /> Add to catalog
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </InsightSection>
+
+          <InsightSection icon={MapPin} label="AISLE TRAFFIC">
+            {topAisles.length === 0 ? (
+              <p className="text-xs italic" style={{ color: '#B4A87F' }}>No routes built yet.</p>
+            ) : (
+              topAisles.map(([num, count]) => (
+                <div key={num} className="flex items-center py-1.5">
+                  <span className="flex-1 text-sm" style={{ color: INK }}>Aisle {num} · {aisleName(num)}</span>
+                  <span className="text-xs font-bold" style={{ color: '#8C7A4A' }}>{count} visit{count === 1 ? '' : 's'}</span>
+                </div>
+              ))
+            )}
+          </InsightSection>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value }) {
+  return (
+    <div className="rounded-lg p-4" style={{ backgroundColor: PAPER }}>
+      <div className="text-2xl font-bold font-mono" style={{ color: INK }}>{value}</div>
+      <div className="text-xs mt-1" style={{ color: '#8C7A4A' }}>{label}</div>
+    </div>
+  );
+}
+
+function InsightSection({ icon: Icon, label, children }) {
+  return (
+    <div className="mb-6">
+      <div className="flex items-center gap-2 mb-2">
+        <Icon size={14} color={ORANGE} />
+        <span className="text-xs font-bold" style={{ color: '#8C7A4A', letterSpacing: 1 }}>{label}</span>
+      </div>
+      <div className="rounded-lg px-3" style={{ backgroundColor: '#fff', border: '1px solid #E5DDCB' }}>
+        {children}
       </div>
     </div>
   );
