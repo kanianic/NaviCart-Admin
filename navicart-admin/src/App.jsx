@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X } from 'lucide-react';
 
 const INK = '#2B241A';
 const BG = '#1E2B22';
@@ -20,7 +20,76 @@ const slugify = (s) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replac
 const productKey = (s) => s.toLowerCase().trim().replace(/\s+/g, '_');
 const titleCase = (s) => s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
+// Client-side CSV download — no server round-trip needed.
+function downloadCsv(filename, rows) {  const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 const DISPLAY_FONT = "'Arial Narrow', 'Helvetica Neue', Arial, sans-serif";
+
+// ---- Spanish/English translations for the entry screens and nav ----
+const STRINGS = {
+  en: {
+    tagline: 'NAVICART · STORE SETUP',
+    logIn: 'Log in',
+    signUp: 'Sign up',
+    createAccount: 'Create your account',
+    email: 'EMAIL',
+    password: 'PASSWORD',
+    pleaseWait: 'Please wait…',
+    noAccount: "Don't have an account? Sign up",
+    haveAccount: 'Already have an account? Log in',
+    logOut: 'Log out',
+    getAislesOnline: 'Get your aisles online',
+    landingSub: "Set up your store's aisle layout and product catalog so shoppers can find what they need.",
+    newStore: 'NEW STORE',
+    storeNamePlaceholder: "Your store's name",
+    yourStores: 'YOUR STORES',
+    switchStore: 'Switch store',
+    editing: 'EDITING',
+    navAisles: 'Aisles',
+    navProducts: 'Products',
+    navDeals: 'Deals',
+    navInsights: 'Insights',
+    navTeam: 'Team',
+    navPreview: 'Shopper preview',
+    connectedNote: 'Connected to a live database — changes here are real and shared with the shopper app.',
+  },
+  es: {
+    tagline: 'NAVICART · CONFIGURACIÓN DE TIENDA',
+    logIn: 'Iniciar sesión',
+    signUp: 'Registrarse',
+    createAccount: 'Crea tu cuenta',
+    email: 'CORREO ELECTRÓNICO',
+    password: 'CONTRASEÑA',
+    pleaseWait: 'Espera un momento…',
+    noAccount: '¿No tienes cuenta? Regístrate',
+    haveAccount: '¿Ya tienes cuenta? Inicia sesión',
+    logOut: 'Cerrar sesión',
+    getAislesOnline: 'Publica los pasillos de tu tienda',
+    landingSub: 'Configura el diseño de pasillos y el catálogo de productos para que los clientes encuentren lo que buscan.',
+    newStore: 'NUEVA TIENDA',
+    storeNamePlaceholder: 'Nombre de tu tienda',
+    yourStores: 'TUS TIENDAS',
+    switchStore: 'Cambiar de tienda',
+    editing: 'EDITANDO',
+    navAisles: 'Pasillos',
+    navProducts: 'Productos',
+    navDeals: 'Ofertas',
+    navInsights: 'Estadísticas',
+    navTeam: 'Equipo',
+    navPreview: 'Vista del cliente',
+    connectedNote: 'Conectado a una base de datos en vivo — los cambios aquí son reales y se comparten con la app del cliente.',
+  },
+};
 
 // ---- Supabase (REST, no SDK — avoids any dependency install) ----
 const SUPABASE_URL = 'https://dsyrxdwtrjioehyefkbd.supabase.co';
@@ -118,13 +187,14 @@ function classifyOffline(existingCategories, rawText) {
   });
 }
 
-function AuthScreen({ onAuthed }) {
+function AuthScreen({ onAuthed, lang, setLang }) {
   const [mode, setMode] = useState('login'); // login | signup
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const t = STRINGS[lang];
 
   const submit = async () => {
     if (!email.trim() || !password) return;
@@ -140,7 +210,7 @@ function AuthScreen({ onAuthed }) {
       if (data.access_token && data.user) {
         onAuthed({ accessToken: data.access_token, user: data.user });
       } else {
-        setNotice('Account created — check your email to confirm, then log in.');
+        setNotice(lang === 'es' ? 'Cuenta creada — revisa tu correo para confirmar y luego inicia sesión.' : 'Account created — check your email to confirm, then log in.');
         setMode('login');
       }
     } catch (e) {
@@ -152,16 +222,21 @@ function AuthScreen({ onAuthed }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-6" style={{ backgroundColor: BG }}>
       <div className="w-full max-w-sm">
-        <div className="flex items-center gap-2 mb-2">
-          <Store size={18} color={ORANGE} />
-          <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>NAVICART · STORE SETUP</span>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <Store size={18} color={ORANGE} />
+            <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>{t.tagline}</span>
+          </div>
+          <button onClick={() => setLang(lang === 'en' ? 'es' : 'en')} className="flex items-center gap-1 text-xs font-bold" style={{ color: CREAM }}>
+            <Languages size={13} /> {lang === 'en' ? 'ES' : 'EN'}
+          </button>
         </div>
         <h1 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: CREAM, fontSize: 30, fontWeight: 700 }} className="mb-6">
-          {mode === 'login' ? 'Log in' : 'Create your account'}
+          {mode === 'login' ? t.logIn : t.createAccount}
         </h1>
 
         <div className="rounded-xl p-5" style={{ backgroundColor: CREAM }}>
-          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>EMAIL</label>
+          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>{t.email}</label>
           <input
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -169,7 +244,7 @@ function AuthScreen({ onAuthed }) {
             className="w-full rounded-lg px-3 py-2 text-sm border outline-none mt-1 mb-3"
             style={{ borderColor: '#E5DDCB', color: INK }}
           />
-          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>PASSWORD</label>
+          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>{t.password}</label>
           <input
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -184,7 +259,7 @@ function AuthScreen({ onAuthed }) {
             className="w-full rounded-lg py-2.5 text-sm font-bold"
             style={{ backgroundColor: ORANGE, color: BG }}
           >
-            {busy ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Sign up'}
+            {busy ? t.pleaseWait : mode === 'login' ? t.logIn : t.signUp}
           </button>
 
           {error && <p className="text-xs mt-3" style={{ color: RED }}>{error}</p>}
@@ -195,7 +270,7 @@ function AuthScreen({ onAuthed }) {
             className="text-xs mt-4 block mx-auto"
             style={{ color: '#8C7A4A' }}
           >
-            {mode === 'login' ? "Don't have an account? Sign up" : 'Already have an account? Log in'}
+            {mode === 'login' ? t.noAccount : t.haveAccount}
           </button>
         </div>
       </div>
@@ -205,6 +280,7 @@ function AuthScreen({ onAuthed }) {
 
 export default function StoreAdmin() {
   const [session, setSession] = useState(null); // {accessToken, user}
+  const [lang, setLang] = useState('en');
   const [phase, setPhase] = useState('auth'); // auth | loading | landing | editor
   const [storeList, setStoreList] = useState([]);
   const [newStoreName, setNewStoreName] = useState('');
@@ -217,8 +293,7 @@ export default function StoreAdmin() {
   const [errorMsg, setErrorMsg] = useState('');
   const [opening, setOpening] = useState(false);
 
-  function handleAuthed(newSession) {
-    currentAccessToken = newSession.accessToken;
+  function handleAuthed(newSession) {    currentAccessToken = newSession.accessToken;
     setSession(newSession);
     loadStores(newSession);
   }
@@ -233,9 +308,17 @@ export default function StoreAdmin() {
   async function loadStores(activeSession) {
     setPhase('loading');
     try {
-      const uid = (activeSession || session).user.id;
-      const rows = await sb(`stores?select=id,slug,name&owner_id=eq.${uid}&order=name`);
-      setStoreList(rows || []);
+      const s = activeSession || session;
+      const uid = s.user.id;
+      const email = s.user.email;
+      const [ownedRows, memberRows] = await Promise.all([
+        sb(`stores?select=id,slug,name,owner_id&owner_id=eq.${uid}&order=name`),
+        sb(`store_members?select=store_id,stores(id,slug,name,owner_id)&email=eq.${encodeURIComponent(email)}`),
+      ]);
+      const staffStores = (memberRows || []).map((m) => m.stores).filter(Boolean);
+      const byId = new Map();
+      [...(ownedRows || []), ...staffStores].forEach((s) => byId.set(s.id, s));
+      setStoreList(Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name)));
     } catch (e) {
       setErrorMsg('Could not reach the database. Check your connection.');
     }
@@ -285,6 +368,46 @@ export default function StoreAdmin() {
       setErrorMsg(`Could not create store: ${e.message || 'unknown error'}`);
     }
     setOpening(false);
+  }
+
+  // ---- staff/team ops ----
+  const [teamMembers, setTeamMembers] = useState([]);
+  useEffect(() => {
+    if (store && store.owner_id === session?.user?.id) loadTeam();
+    else setTeamMembers([]);
+  }, [store?.id]);
+  async function loadTeam() {
+    try {
+      const rows = await sb(`store_members?store_id=eq.${store.id}&select=*&order=added_at`);
+      setTeamMembers(rows || []);
+    } catch (e) {
+      setTeamMembers([]);
+    }
+  }
+  async function addStaff(email) {
+    const clean = email.trim().toLowerCase();
+    if (!clean) return;
+    setSync('saving');
+    try {
+      const rows = await sb('store_members', {
+        method: 'POST',
+        body: JSON.stringify({ store_id: store.id, email: clean }),
+      });
+      setTeamMembers((prev) => [...prev, rows[0]]);
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
+  }
+  async function removeStaff(id) {
+    setTeamMembers((prev) => prev.filter((m) => m.id !== id));
+    setSync('saving');
+    try {
+      await sb(`store_members?id=eq.${id}`, { method: 'DELETE' });
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
   }
 
   // ---- promo ops ----
@@ -506,7 +629,7 @@ export default function StoreAdmin() {
 
   return (
     <div className="min-h-screen w-full" style={{ backgroundColor: BG, fontFamily: 'system-ui, sans-serif' }}>
-      {phase === 'auth' && <AuthScreen onAuthed={handleAuthed} />}
+      {phase === 'auth' && <AuthScreen onAuthed={handleAuthed} lang={lang} setLang={setLang} />}
 
       {phase === 'loading' && (
         <div className="min-h-screen flex items-center justify-center">
@@ -524,15 +647,22 @@ export default function StoreAdmin() {
           opening={opening}
           errorMsg={errorMsg}
           onLogOut={logOut}
+          lang={lang}
+          setLang={setLang}
         />
       )}
 
       {phase === 'editor' && store && (
         <EditorShell
           store={store}
+          session={session}
+          lang={lang}
           aisles={aisles}
           products={products}
           promos={promos}
+          teamMembers={teamMembers}
+          addStaff={addStaff}
+          removeStaff={removeStaff}
           tab={tab}
           setTab={setTab}
           onBack={backToStores}
@@ -559,22 +689,28 @@ function SyncBadge({ sync }) {
   return <span className="flex items-center gap-1 text-xs" style={{ color: GREEN }}><Cloud size={11} /> Synced live</span>;
 }
 
-function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, opening, errorMsg, onLogOut }) {
+function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, opening, errorMsg, onLogOut, lang, setLang }) {
+  const t = STRINGS[lang];
   return (
     <div className="min-h-screen flex items-center justify-center px-6 py-16">
       <div className="w-full max-w-md">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <Store size={18} color={ORANGE} />
-            <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>NAVICART · STORE SETUP</span>
+            <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>{t.tagline}</span>
           </div>
-          <button onClick={onLogOut} className="text-xs" style={{ color: MUTED }}>Log out</button>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setLang(lang === 'en' ? 'es' : 'en')} className="flex items-center gap-1 text-xs font-bold" style={{ color: MUTED }}>
+              <Languages size={13} /> {lang === 'en' ? 'ES' : 'EN'}
+            </button>
+            <button onClick={onLogOut} className="text-xs" style={{ color: MUTED }}>{t.logOut}</button>
+          </div>
         </div>
         <h1 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: CREAM, fontSize: 34, fontWeight: 700, lineHeight: 1.15 }} className="mb-1">
-          Get your aisles online
+          {t.getAislesOnline}
         </h1>
         <p style={{ color: MUTED }} className="text-sm mb-8">
-          Set up your store's aisle layout and product catalog so shoppers can find what they need.
+          {t.landingSub}
         </p>
 
         {errorMsg && (
@@ -585,12 +721,12 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
         )}
 
         <div className="rounded-xl p-5 mb-6" style={{ backgroundColor: CREAM }}>
-          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>NEW STORE</label>
+          <label style={{ color: '#8C7A4A', fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>{t.newStore}</label>
           <div className="flex gap-2 mt-2">
             <input
               value={newStoreName}
               onChange={(e) => setNewStoreName(e.target.value)}
-              placeholder="Your store's name"
+              placeholder={t.storeNamePlaceholder}
               className="flex-1 rounded-lg px-3 py-2 text-sm outline-none border"
               style={{ borderColor: '#E5DDCB', color: INK }}
               onKeyDown={(e) => e.key === 'Enter' && onCreate()}
@@ -603,7 +739,7 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
 
         {storeList.length > 0 && (
           <div>
-            <label style={{ color: MUTED, fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>YOUR STORES</label>
+            <label style={{ color: MUTED, fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>{t.yourStores}</label>
             <div className="mt-2 space-y-2">
               {storeList.map((s) => (
                 <button
@@ -629,22 +765,24 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
 }
 
 function EditorShell({
-  store, aisles, products, promos, tab, setTab, onBack, sync,
+  store, session, lang, aisles, products, promos, teamMembers, addStaff, removeStaff, tab, setTab, onBack, sync,
   addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport, commitSmartImport,
   addPromo, deletePromo,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
+  const isOwner = store.owner_id === session?.user?.id;
+  const tr = STRINGS[lang];
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
       <div className="md:w-64 flex-shrink-0 p-6 flex flex-col" style={{ backgroundColor: BG }}>
         <button onClick={onBack} className="flex items-center gap-1 mb-8 text-sm" style={{ color: MUTED }}>
-          <ChevronLeft size={14} /> Switch store
+          <ChevronLeft size={14} /> {tr.switchStore}
         </button>
 
         <div className="flex items-center gap-2 mb-1">
           <Store size={16} color={ORANGE} />
-          <span style={{ color: ORANGE, fontSize: 10, fontWeight: 700, letterSpacing: 2 }}>EDITING</span>
+          <span style={{ color: ORANGE, fontSize: 10, fontWeight: 700, letterSpacing: 2 }}>{tr.editing}</span>
         </div>
         <h2 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: CREAM, fontSize: 22, fontWeight: 700 }} className="mb-8">
           {store.name}
@@ -652,20 +790,21 @@ function EditorShell({
 
         <nav className="space-y-1 flex-1">
           {[
-            { id: 'aisles', label: 'Aisles', icon: LayoutGrid },
-            { id: 'products', label: 'Products', icon: Tags },
-            { id: 'deals', label: 'Deals', icon: Tag },
-            { id: 'insights', label: 'Insights', icon: BarChart3 },
-            { id: 'preview', label: 'Shopper preview', icon: Eye },
-          ].map((t) => (
+            { id: 'aisles', label: tr.navAisles, icon: LayoutGrid },
+            { id: 'products', label: tr.navProducts, icon: Tags },
+            { id: 'deals', label: tr.navDeals, icon: Tag },
+            { id: 'insights', label: tr.navInsights, icon: BarChart3 },
+            ...(isOwner ? [{ id: 'team', label: tr.navTeam, icon: Users }] : []),
+            { id: 'preview', label: tr.navPreview, icon: Eye },
+          ].map((tabDef) => (
             <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
+              key={tabDef.id}
+              onClick={() => setTab(tabDef.id)}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition"
-              style={{ backgroundColor: tab === t.id ? ORANGE : 'transparent', color: tab === t.id ? BG : CREAM }}
+              style={{ backgroundColor: tab === tabDef.id ? ORANGE : 'transparent', color: tab === tabDef.id ? BG : CREAM }}
             >
-              <t.icon size={15} />
-              {t.label}
+              <tabDef.icon size={15} />
+              {tabDef.label}
             </button>
           ))}
         </nav>
@@ -684,7 +823,52 @@ function EditorShell({
           <DealsTab aisles={aisles} promos={promos} addPromo={addPromo} deletePromo={deletePromo} />
         )}
         {tab === 'insights' && <InsightsTab store={store} aisles={aisles} addProduct={addProduct} />}
+        {tab === 'team' && isOwner && (
+          <TeamTab teamMembers={teamMembers} addStaff={addStaff} removeStaff={removeStaff} />
+        )}
         {tab === 'preview' && <PreviewTab aisles={aisles} products={products} unmapped={unmapped} />}
+      </div>
+    </div>
+  );
+}
+
+function TeamTab({ teamMembers, addStaff, removeStaff }) {
+  const [email, setEmail] = useState('');
+  return (
+    <div className="max-w-xl">
+      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Team</h3>
+      <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>
+        Give other people at your store their own login to manage aisles, products, and deals — without sharing your account.
+        They'll need to sign up for a NaviCart account with this exact email first.
+      </p>
+
+      <div className="space-y-2 mb-6">
+        {teamMembers.length === 0 && (
+          <p className="text-sm italic" style={{ color: '#B4A87F' }}>Just you for now.</p>
+        )}
+        {teamMembers.map((m) => (
+          <div key={m.id} className="flex items-center gap-3 rounded-lg px-4 py-3" style={{ backgroundColor: PAPER }}>
+            <Users size={15} color={ORANGE} />
+            <span className="flex-1 text-sm font-semibold" style={{ color: INK }}>{m.email}</span>
+            <button onClick={() => removeStaff(m.id)}>
+              <Trash2 size={15} color={RED} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="teammate@email.com"
+          className="flex-1 rounded-lg px-3 py-2.5 text-sm border outline-none"
+          style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { addStaff(email); setEmail(''); } }}
+        />
+        <button onClick={() => { addStaff(email); setEmail(''); }} className="rounded-lg px-4 flex items-center gap-2 text-sm font-bold" style={{ backgroundColor: ORANGE, color: BG }}>
+          <Plus size={15} /> Add
+        </button>
       </div>
     </div>
   );
@@ -974,6 +1158,7 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
   const [importing, setImporting] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPrice, setNewPrice] = useState('');
+  const [showScanner, setShowScanner] = useState(false);
 
   const runImport = async () => {
     setImporting(true);
@@ -983,10 +1168,42 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
     setImporting(false);
   };
 
+  const exportCsv = () => {
+    const rows = [
+      ['Name', 'Aisle Number', 'Price', 'Stock', 'Barcode'],
+      ...products.map((p) => [p.label, p.aisle_number ?? '', p.price, p.stock, p.barcode || '']),
+    ];
+    downloadCsv(`catalog-export-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+  };
+
   return (
     <div>
-      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Product catalog</h3>
-      <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>Each card below is a live shelf tag — edit it and shoppers see the change immediately.</p>
+      <div className="flex items-start justify-between mb-1">
+        <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }}>Product catalog</h3>
+        <button onClick={exportCsv} className="flex items-center gap-1 text-xs font-semibold" style={{ color: '#4C6B45' }}>
+          <Download size={13} /> Export as CSV
+        </button>
+      </div>
+      <p className="text-sm mb-4" style={{ color: '#8C7A4A' }}>Each card below is a live shelf tag — edit it and shoppers see the change immediately.</p>
+
+      <div className="rounded-lg p-3 mb-4 flex items-start gap-2" style={{ backgroundColor: PAPER }}>
+        <ScanLine size={15} color="#8C7A4A" className="mt-0.5 flex-shrink-0" />
+        <p className="text-xs" style={{ color: '#8C7A4A' }}>
+          Already run a POS system (Square, IT Retail, Clover, etc.)? Export your inventory report and paste it into
+          Smart Import below. Live, automatic POS sync is on our roadmap — starting with Square.
+        </p>
+      </div>
+
+      <button onClick={() => setShowScanner(true)} className="flex items-center gap-2 text-sm font-semibold mb-4" style={{ color: '#4C6B45' }}>
+        <ScanLine size={15} /> Scan a barcode to update stock
+      </button>
+      {showScanner && (
+        <BarcodeScannerModal
+          products={products}
+          updateProduct={updateProduct}
+          onClose={() => setShowScanner(false)}
+        />
+      )}
 
       <SmartImportPanel aisles={aisles} commitSmartImport={commitSmartImport} />
 
@@ -1052,6 +1269,122 @@ function ProductsTab({ aisles, products, updateProduct, deleteProduct, addProduc
   );
 }
 
+function BarcodeScannerModal({ products, updateProduct, onClose }) {
+  const videoRef = useRef(null);
+  const [supported] = useState(typeof window !== 'undefined' && 'BarcodeDetector' in window);
+  const [manualCode, setManualCode] = useState('');
+  const [matched, setMatched] = useState(null); // product or 'notfound' or null
+  const [scannedCode, setScannedCode] = useState('');
+  const [cameraError, setCameraError] = useState('');
+
+  useEffect(() => {
+    if (!supported) return;
+    let stream;
+    let stop = false;
+    const detector = new window.BarcodeDetector({
+      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39'],
+    });
+
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        const scanLoop = async () => {
+          if (stop || !videoRef.current) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes.length > 0) {
+              handleCode(codes[0].rawValue);
+              return;
+            }
+          } catch (e) { /* keep trying */ }
+          requestAnimationFrame(scanLoop);
+        };
+        scanLoop();
+      } catch (e) {
+        setCameraError('Could not access the camera. Check your browser permissions, or enter the barcode manually below.');
+      }
+    })();
+
+    return () => {
+      stop = true;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    };
+  }, [supported]);
+
+  function handleCode(code) {
+    setScannedCode(code);
+    const found = products.find((p) => p.barcode && p.barcode === code);
+    setMatched(found || 'notfound');
+  }
+
+  const cycleStock = (product) => {
+    const order = ['in', 'low', 'out'];
+    const next = order[(order.indexOf(product.stock) + 1) % order.length];
+    updateProduct(product.id, { stock: next });
+    setMatched({ ...product, stock: next });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(30,43,34,0.85)' }}>
+      <div className="rounded-xl p-5 w-full max-w-sm" style={{ backgroundColor: CREAM }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-sm font-bold" style={{ color: INK }}>Scan a barcode</span>
+          <button onClick={onClose}><X size={18} color="#8C7A4A" /></button>
+        </div>
+
+        {supported && !cameraError && !matched && (
+          <video ref={videoRef} className="w-full rounded-lg mb-3" style={{ backgroundColor: '#000', aspectRatio: '4/3' }} muted playsInline />
+        )}
+
+        {(!supported || cameraError) && !matched && (
+          <div className="mb-3">
+            <p className="text-xs mb-2" style={{ color: '#8C7A4A' }}>
+              {cameraError || "Camera barcode scanning isn't supported in this browser — try Chrome on Android, or type the code below."}
+            </p>
+            <div className="flex gap-2">
+              <input
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value)}
+                placeholder="Enter barcode digits"
+                className="flex-1 rounded-lg px-3 py-2 text-sm border outline-none"
+                style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+                onKeyDown={(e) => e.key === 'Enter' && handleCode(manualCode.trim())}
+              />
+              <button onClick={() => handleCode(manualCode.trim())} className="rounded-lg px-3 text-sm font-bold" style={{ backgroundColor: ORANGE, color: BG }}>Go</button>
+            </div>
+          </div>
+        )}
+
+        {matched && matched !== 'notfound' && (
+          <div className="rounded-lg p-4" style={{ backgroundColor: PAPER }}>
+            <p className="text-sm font-bold mb-1" style={{ color: INK }}>{matched.label}</p>
+            <p className="text-xs mb-3" style={{ color: '#8C7A4A' }}>Current stock: {STOCK_META[matched.stock].label}</p>
+            <button onClick={() => cycleStock(matched)} className="rounded-lg px-4 py-2 text-sm font-bold" style={{ backgroundColor: GREEN, color: BG }}>
+              Tap to cycle stock status
+            </button>
+            <button onClick={() => { setMatched(null); setScannedCode(''); }} className="block mt-3 text-xs" style={{ color: '#8C7A4A' }}>Scan another</button>
+          </div>
+        )}
+
+        {matched === 'notfound' && (
+          <div className="rounded-lg p-4" style={{ backgroundColor: PAPER }}>
+            <p className="text-sm font-bold mb-1" style={{ color: INK }}>No product matches this barcode</p>
+            <p className="text-xs mb-2 font-mono" style={{ color: '#8C7A4A' }}>{scannedCode}</p>
+            <p className="text-xs mb-3" style={{ color: '#8C7A4A' }}>
+              Add a new product below, then paste this code into its Barcode field.
+            </p>
+            <button onClick={() => { setMatched(null); setScannedCode(''); }} className="text-xs font-bold" style={{ color: '#4C6B45' }}>Scan another</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProductTag({ product, aisles, updateProduct, deleteProduct }) {
   const stock = STOCK_META[product.stock] || STOCK_META.in;
   return (
@@ -1084,7 +1417,7 @@ function ProductTag({ product, aisles, updateProduct, deleteProduct }) {
         </select>
       </div>
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-1">
           <span className="font-mono text-sm font-bold" style={{ color: INK }}>$</span>
           <input
@@ -1106,6 +1439,17 @@ function ProductTag({ product, aisles, updateProduct, deleteProduct }) {
           <span style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: stock.color, display: 'inline-block' }} />
           {stock.label}
         </button>
+      </div>
+
+      <div className="flex items-center gap-1">
+        <ScanLine size={11} color="#B4A87F" />
+        <input
+          value={product.barcode || ''}
+          onChange={(e) => updateProduct(product.id, { barcode: e.target.value })}
+          placeholder="Barcode (optional)"
+          className="text-xs bg-transparent outline-none flex-1 font-mono"
+          style={{ color: '#8C7A4A' }}
+        />
       </div>
     </div>
   );
@@ -1150,6 +1494,16 @@ function InsightsTab({ store, aisles, addProduct }) {
     setAddedKeys((prev) => [...prev, name]);
   };
 
+  const exportInsightsCsv = () => {
+    const rows = [
+      ['Type', 'Item / Aisle', 'Count'],
+      ...topSearched.map(([name, count]) => ['Top Searched', name, count]),
+      ...topNotFound.map(([name, count]) => ["Don't Carry", name, count]),
+      ...topAisles.map(([num, count]) => ['Aisle Traffic', `Aisle ${num} · ${aisleName(num)}`, count]),
+    ];
+    downloadCsv(`insights-export-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+  };
+
   if (status === 'loading') {
     return <div className="flex items-center gap-2 text-sm" style={{ color: '#8C7A4A' }}><Loader2 size={14} className="animate-spin" /> Loading usage data…</div>;
   }
@@ -1159,7 +1513,14 @@ function InsightsTab({ store, aisles, addProduct }) {
 
   return (
     <div className="max-w-2xl">
-      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Insights</h3>
+      <div className="flex items-start justify-between mb-1">
+        <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }}>Insights</h3>
+        {events.length > 0 && (
+          <button onClick={exportInsightsCsv} className="flex items-center gap-1 text-xs font-semibold" style={{ color: '#4C6B45' }}>
+            <Download size={13} /> Export as CSV
+          </button>
+        )}
+      </div>
       <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>
         Real usage from shoppers in the app — this fills in on its own as people shop, nothing to set up.
       </p>
