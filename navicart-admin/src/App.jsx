@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X, Move, ChefHat } from 'lucide-react';
+import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X, Move, ChefHat, Settings, ShieldAlert } from 'lucide-react';
 
 const INK = '#2B241A';
 const BG = '#1E2B22';
@@ -289,6 +289,9 @@ export default function StoreAdmin() {
   const [products, setProducts] = useState([]); // [{id, key, label, aisle_number, price, stock}]
   const [promos, setPromos] = useState([]); // [{id, aisle_number, text}]
   const [recipes, setRecipes] = useState([]); // [{id, title, description, ingredients, image_url}]
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pendingTransfers, setPendingTransfers] = useState([]);
+  const [adminStores, setAdminStores] = useState([]);
   const [tab, setTab] = useState('aisles');
   const [sync, setSync] = useState('idle'); // idle | saving | error
   const [errorMsg, setErrorMsg] = useState('');
@@ -297,13 +300,25 @@ export default function StoreAdmin() {
   function handleAuthed(newSession) {    currentAccessToken = newSession.accessToken;
     setSession(newSession);
     loadStores(newSession);
+    checkAdmin(newSession);
   }
 
   function logOut() {
     currentAccessToken = null;
     setSession(null);
     setStore(null);
+    setIsAdmin(false);
     setPhase('auth');
+  }
+
+  async function checkAdmin(activeSession) {
+    try {
+      const email = (activeSession || session).user.email;
+      const rows = await sb(`platform_admins?select=email&email=eq.${encodeURIComponent(email)}`);
+      setIsAdmin((rows || []).length > 0);
+    } catch (e) {
+      setIsAdmin(false);
+    }
   }
 
   async function loadStores(activeSession) {
@@ -312,18 +327,60 @@ export default function StoreAdmin() {
       const s = activeSession || session;
       const uid = s.user.id;
       const email = s.user.email;
-      const [ownedRows, memberRows] = await Promise.all([
-        sb(`stores?select=id,slug,name,owner_id,entrance_x,entrance_y,checkout_x,checkout_y&owner_id=eq.${uid}&order=name`),
-        sb(`store_members?select=store_id,stores(id,slug,name,owner_id,entrance_x,entrance_y,checkout_x,checkout_y)&email=eq.${encodeURIComponent(email)}`),
+      const [ownedRows, memberRows, transferRows] = await Promise.all([
+        sb(`stores?select=id,slug,name,owner_id,entrance_x,entrance_y,checkout_x,checkout_y,pending_transfer_email,suspended&owner_id=eq.${uid}&order=name`),
+        sb(`store_members?select=store_id,stores(id,slug,name,owner_id,entrance_x,entrance_y,checkout_x,checkout_y,pending_transfer_email,suspended)&email=eq.${encodeURIComponent(email)}`),
+        sb(`stores?select=id,slug,name&pending_transfer_email=eq.${encodeURIComponent(email)}`),
       ]);
       const staffStores = (memberRows || []).map((m) => m.stores).filter(Boolean);
       const byId = new Map();
       [...(ownedRows || []), ...staffStores].forEach((s) => byId.set(s.id, s));
       setStoreList(Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name)));
+      setPendingTransfers(transferRows || []);
     } catch (e) {
       setErrorMsg('Could not reach the database. Check your connection.');
     }
     setPhase('landing');
+  }
+
+  async function acceptTransfer(storeId) {
+    setErrorMsg('');
+    try {
+      await sb(`stores?id=eq.${storeId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ owner_id: session.user.id, pending_transfer_email: null }),
+      });
+      await loadStores();
+    } catch (e) {
+      setErrorMsg('Could not accept that transfer. Try again.');
+    }
+  }
+
+  async function loadAdminStores() {
+    try {
+      const rows = await sb('stores?select=id,slug,name,owner_id,suspended&order=name');
+      setAdminStores(rows || []);
+    } catch (e) {
+      setAdminStores([]);
+    }
+  }
+
+  async function adminSetSuspended(storeId, suspended) {
+    setAdminStores((prev) => prev.map((s) => (s.id === storeId ? { ...s, suspended } : s)));
+    try {
+      await sb(`stores?id=eq.${storeId}`, { method: 'PATCH', body: JSON.stringify({ suspended }) });
+    } catch (e) {
+      loadAdminStores();
+    }
+  }
+
+  async function adminDeleteStore(storeId) {
+    setAdminStores((prev) => prev.filter((s) => s.id !== storeId));
+    try {
+      await sb(`stores?id=eq.${storeId}`, { method: 'DELETE' });
+    } catch (e) {
+      loadAdminStores();
+    }
   }
 
   async function openStore(s) {
@@ -477,6 +534,33 @@ export default function StoreAdmin() {
   function backToStores() {
     setStore(null);
     loadStores();
+  }
+
+  // ---- danger zone: delete + transfer ----
+  async function deleteStore() {
+    const id = store.id;
+    setSync('saving');
+    try {
+      await sb(`stores?id=eq.${id}`, { method: 'DELETE' });
+      backToStores();
+    } catch (e) {
+      setErrorMsg('Could not delete that store. Try again.');
+      setSync('error');
+    }
+  }
+
+  async function setTransferEmail(email) {
+    setSync('saving');
+    try {
+      const rows = await sb(`stores?id=eq.${store.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ pending_transfer_email: email ? email.toLowerCase().trim() : null }),
+      });
+      setStore(rows[0]);
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
   }
 
   // ---- aisle ops (each hits the DB immediately) ----
@@ -715,6 +799,19 @@ export default function StoreAdmin() {
           onLogOut={logOut}
           lang={lang}
           setLang={setLang}
+          isAdmin={isAdmin}
+          onOpenAdmin={() => { loadAdminStores(); setPhase('admin'); }}
+          pendingTransfers={pendingTransfers}
+          onAcceptTransfer={acceptTransfer}
+        />
+      )}
+
+      {phase === 'admin' && (
+        <AdminView
+          stores={adminStores}
+          onSuspend={adminSetSuspended}
+          onDelete={adminDeleteStore}
+          onBack={() => setPhase('landing')}
         />
       )}
 
@@ -750,6 +847,8 @@ export default function StoreAdmin() {
           recipes={recipes}
           addRecipe={addRecipe}
           deleteRecipe={deleteRecipe}
+          deleteStore={deleteStore}
+          setTransferEmail={setTransferEmail}
         />
       )}
     </div>
@@ -762,7 +861,7 @@ function SyncBadge({ sync }) {
   return <span className="flex items-center gap-1 text-xs" style={{ color: GREEN }}><Cloud size={11} /> Synced live</span>;
 }
 
-function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, opening, errorMsg, onLogOut, lang, setLang }) {
+function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, opening, errorMsg, onLogOut, lang, setLang, isAdmin, onOpenAdmin, pendingTransfers, onAcceptTransfer }) {
   const t = STRINGS[lang];
   return (
     <div className="min-h-screen flex items-center justify-center px-6 py-16">
@@ -773,6 +872,11 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
             <span style={{ color: ORANGE, letterSpacing: 3, fontSize: 11, fontWeight: 700 }}>{t.tagline}</span>
           </div>
           <div className="flex items-center gap-3">
+            {isAdmin && (
+              <button onClick={onOpenAdmin} className="flex items-center gap-1 text-xs font-bold" style={{ color: '#E8A67D' }}>
+                <ShieldAlert size={13} /> Admin
+              </button>
+            )}
             <button onClick={() => setLang(lang === 'en' ? 'es' : 'en')} className="flex items-center gap-1 text-xs font-bold" style={{ color: MUTED }}>
               <Languages size={13} /> {lang === 'en' ? 'ES' : 'EN'}
             </button>
@@ -790,6 +894,22 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
           <div className="rounded-lg p-3 mb-4 flex gap-2 items-start" style={{ backgroundColor: 'rgba(200,80,50,0.15)' }}>
             <AlertTriangle size={14} color="#E8A67D" className="mt-0.5 flex-shrink-0" />
             <span className="text-xs" style={{ color: '#E8A67D' }}>{errorMsg}</span>
+          </div>
+        )}
+
+        {pendingTransfers.length > 0 && (
+          <div className="rounded-xl p-5 mb-6" style={{ backgroundColor: '#2B3D2F', border: '1px solid rgba(226,137,31,0.4)' }}>
+            <label style={{ color: ORANGE, fontSize: 11, fontWeight: 700, letterSpacing: 1.5 }}>PENDING TRANSFERS TO YOU</label>
+            <div className="mt-2 space-y-2">
+              {pendingTransfers.map((s) => (
+                <div key={s.id} className="flex items-center justify-between rounded-lg px-3 py-2" style={{ backgroundColor: 'rgba(255,255,255,0.06)' }}>
+                  <span style={{ color: CHALK, fontSize: 13, fontWeight: 600 }}>{s.name}</span>
+                  <button onClick={() => onAcceptTransfer(s.id)} className="rounded-md px-3 py-1 text-xs font-bold" style={{ backgroundColor: GREEN, color: BG }}>
+                    Accept
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -841,7 +961,7 @@ function EditorShell({
   store, session, lang, aisles, products, promos, teamMembers, addStaff, removeStaff, tab, setTab, onBack, sync,
   addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport, commitSmartImport,
   addPromo, deletePromo, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint,
-  recipes, addRecipe, deleteRecipe,
+  recipes, addRecipe, deleteRecipe, deleteStore, setTransferEmail,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
   const isOwner = store.owner_id === session?.user?.id;
@@ -872,6 +992,7 @@ function EditorShell({
             { id: 'insights', label: tr.navInsights, icon: BarChart3 },
             ...(isOwner ? [{ id: 'team', label: tr.navTeam, icon: Users }] : []),
             { id: 'preview', label: tr.navPreview, icon: Eye },
+            ...(isOwner ? [{ id: 'settings', label: 'Settings', icon: Settings }] : []),
           ].map((tabDef) => (
             <button
               key={tabDef.id}
@@ -916,6 +1037,149 @@ function EditorShell({
           <TeamTab teamMembers={teamMembers} addStaff={addStaff} removeStaff={removeStaff} />
         )}
         {tab === 'preview' && <PreviewTab aisles={aisles} products={products} unmapped={unmapped} />}
+        {tab === 'settings' && isOwner && (
+          <SettingsTab store={store} onBack={onBack} deleteStore={deleteStore} setTransferEmail={setTransferEmail} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SettingsTab({ store, onBack, deleteStore, setTransferEmail }) {
+  const [transferInput, setTransferInput] = useState('');
+  const [confirmName, setConfirmName] = useState('');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  const sendTransfer = () => {
+    if (!transferInput.trim()) return;
+    setTransferEmail(transferInput.trim());
+    setTransferInput('');
+  };
+
+  const confirmDelete = () => {
+    if (confirmName.trim().toLowerCase() !== store.name.trim().toLowerCase()) return;
+    deleteStore();
+  };
+
+  return (
+    <div className="max-w-xl">
+      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Settings</h3>
+      <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>Ownership and account-level controls for {store.name}.</p>
+
+      <div className="rounded-lg p-4 mb-6" style={{ backgroundColor: PAPER }}>
+        <p className="text-sm font-bold mb-1" style={{ color: INK }}>Transfer ownership</p>
+        <p className="text-xs mb-3" style={{ color: '#8C7A4A' }}>
+          Selling the store or handing it off? Enter the new owner's email. They'll need to log in and accept —
+          nothing changes until they do.
+        </p>
+        {store.pending_transfer_email ? (
+          <div className="flex items-center justify-between rounded-lg px-3 py-2 mb-2" style={{ backgroundColor: '#fff' }}>
+            <span className="text-xs" style={{ color: INK }}>Pending transfer to <strong>{store.pending_transfer_email}</strong></span>
+            <button onClick={() => setTransferEmail(null)} className="text-xs font-bold" style={{ color: RED }}>Cancel</button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <input
+              value={transferInput}
+              onChange={(e) => setTransferInput(e.target.value)}
+              placeholder="newowner@email.com"
+              className="flex-1 rounded-lg px-3 py-2 text-sm border outline-none"
+              style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+            />
+            <button onClick={sendTransfer} className="rounded-lg px-4 text-sm font-bold" style={{ backgroundColor: ORANGE, color: BG }}>
+              Transfer
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-lg p-4" style={{ backgroundColor: '#FBEAD3', border: '1px solid #E2891F55' }}>
+        <p className="text-sm font-bold mb-1" style={{ color: '#7A2E17' }}>Delete this store</p>
+        <p className="text-xs mb-3" style={{ color: '#8C7A4A' }}>
+          Permanently removes {store.name} and everything in it — aisles, products, deals, recipes, and usage
+          history. This can't be undone.
+        </p>
+        {!showDeleteConfirm ? (
+          <button onClick={() => setShowDeleteConfirm(true)} className="rounded-lg px-4 py-2 text-sm font-bold" style={{ backgroundColor: RED, color: '#fff' }}>
+            Delete store
+          </button>
+        ) : (
+          <div>
+            <p className="text-xs mb-2" style={{ color: '#7A2E17' }}>
+              Type <strong>{store.name}</strong> to confirm:
+            </p>
+            <input
+              value={confirmName}
+              onChange={(e) => setConfirmName(e.target.value)}
+              className="w-full rounded-lg px-3 py-2 text-sm border outline-none mb-2"
+              style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={confirmDelete}
+                disabled={confirmName.trim().toLowerCase() !== store.name.trim().toLowerCase()}
+                className="rounded-lg px-4 py-2 text-sm font-bold"
+                style={{ backgroundColor: RED, color: '#fff', opacity: confirmName.trim().toLowerCase() === store.name.trim().toLowerCase() ? 1 : 0.5 }}
+              >
+                Permanently delete
+              </button>
+              <button onClick={() => { setShowDeleteConfirm(false); setConfirmName(''); }} className="text-sm" style={{ color: '#8C7A4A' }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminView({ stores, onSuspend, onDelete, onBack }) {
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  return (
+    <div className="min-h-screen p-6 md:p-10" style={{ backgroundColor: BG }}>
+      <button onClick={onBack} className="flex items-center gap-1 mb-6 text-sm" style={{ color: MUTED }}>
+        <ChevronLeft size={14} /> Back
+      </button>
+      <div className="flex items-center gap-2 mb-1">
+        <ShieldAlert size={18} color="#E8A67D" />
+        <span style={{ color: '#E8A67D', letterSpacing: 2, fontSize: 11, fontWeight: 700 }}>PLATFORM ADMIN</span>
+      </div>
+      <h1 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: CREAM, fontSize: 28, fontWeight: 700 }} className="mb-6">
+        Every store
+      </h1>
+
+      <div className="space-y-2 max-w-2xl">
+        {stores.map((s) => (
+          <div key={s.id} className="rounded-lg p-4 flex items-center justify-between" style={{ backgroundColor: CREAM }}>
+            <div>
+              <p className="text-sm font-bold" style={{ color: INK }}>{s.name}</p>
+              {s.suspended && <p className="text-xs font-bold" style={{ color: RED }}>SUSPENDED</p>}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onSuspend(s.id, !s.suspended)}
+                className="rounded-lg px-3 py-1.5 text-xs font-bold"
+                style={{ backgroundColor: s.suspended ? GREEN : '#FBEAD3', color: s.suspended ? BG : '#7A2E17' }}
+              >
+                {s.suspended ? 'Reactivate' : 'Suspend'}
+              </button>
+              {confirmDeleteId === s.id ? (
+                <>
+                  <button onClick={() => onDelete(s.id)} className="rounded-lg px-3 py-1.5 text-xs font-bold" style={{ backgroundColor: RED, color: '#fff' }}>
+                    Confirm delete
+                  </button>
+                  <button onClick={() => setConfirmDeleteId(null)} className="text-xs" style={{ color: '#8C7A4A' }}>Cancel</button>
+                </>
+              ) : (
+                <button onClick={() => setConfirmDeleteId(s.id)}>
+                  <Trash2 size={16} color={RED} />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
