@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X } from 'lucide-react';
+import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X, Move } from 'lucide-react';
 
 const INK = '#2B241A';
 const BG = '#1E2B22';
@@ -469,6 +469,21 @@ export default function StoreAdmin() {
     }
   }
 
+  // Persists a floor-plan box move/resize. Called frequently while
+  // dragging (local state only) and once on release (writes to DB).
+  function moveAisleLocal(id, patch) {
+    setAisles((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  }
+  async function saveAisleLayout(id, patch) {
+    setSync('saving');
+    try {
+      await sb(`aisles?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
+  }
+
   async function deleteAisle(id, number) {
     setSync('saving');
     try {
@@ -670,6 +685,8 @@ export default function StoreAdmin() {
           addAisle={addAisle}
           renameAisle={renameAisle}
           deleteAisle={deleteAisle}
+          moveAisleLocal={moveAisleLocal}
+          saveAisleLayout={saveAisleLayout}
           addProduct={addProduct}
           updateProduct={updateProduct}
           deleteProduct={deleteProduct}
@@ -767,7 +784,7 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
 function EditorShell({
   store, session, lang, aisles, products, promos, teamMembers, addStaff, removeStaff, tab, setTab, onBack, sync,
   addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport, commitSmartImport,
-  addPromo, deletePromo,
+  addPromo, deletePromo, moveAisleLocal, saveAisleLayout,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
   const isOwner = store.owner_id === session?.user?.id;
@@ -791,6 +808,7 @@ function EditorShell({
         <nav className="space-y-1 flex-1">
           {[
             { id: 'aisles', label: tr.navAisles, icon: LayoutGrid },
+            { id: 'floorplan', label: 'Floor Plan', icon: Move },
             { id: 'products', label: tr.navProducts, icon: Tags },
             { id: 'deals', label: tr.navDeals, icon: Tag },
             { id: 'insights', label: tr.navInsights, icon: BarChart3 },
@@ -816,6 +834,9 @@ function EditorShell({
 
       <div className="flex-1 p-6 md:p-10" style={{ backgroundColor: CREAM }}>
         {tab === 'aisles' && <AislesTab aisles={aisles} renameAisle={renameAisle} deleteAisle={deleteAisle} addAisle={addAisle} />}
+        {tab === 'floorplan' && (
+          <FloorPlanTab aisles={aisles} moveAisleLocal={moveAisleLocal} saveAisleLayout={saveAisleLayout} />
+        )}
         {tab === 'products' && (
           <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} commitSmartImport={commitSmartImport} />
         )}
@@ -827,6 +848,120 @@ function EditorShell({
           <TeamTab teamMembers={teamMembers} addStaff={addStaff} removeStaff={removeStaff} />
         )}
         {tab === 'preview' && <PreviewTab aisles={aisles} products={products} unmapped={unmapped} />}
+      </div>
+    </div>
+  );
+}
+
+function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
+  const canvasRef = useRef(null);
+  const [dragId, setDragId] = useState(null);
+  const [resizeId, setResizeId] = useState(null);
+  const dragOffset = useRef({ x: 0, y: 0 });
+  const CANVAS_W = 600;
+  const CANVAS_H = 500;
+  const GRID = 10;
+
+  const snap = (v) => Math.round(v / GRID) * GRID;
+
+  const getPoint = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  };
+
+  const startDrag = (e, aisle) => {
+    e.stopPropagation();
+    const p = getPoint(e);
+    dragOffset.current = { x: p.x - aisle.x, y: p.y - aisle.y };
+    setDragId(aisle.id);
+  };
+
+  const startResize = (e, aisle) => {
+    e.stopPropagation();
+    dragOffset.current = { x: aisle.w, y: aisle.h, startX: getPoint(e).x, startY: getPoint(e).y };
+    setResizeId(aisle.id);
+  };
+
+  const onMove = (e) => {
+    if (!dragId && !resizeId) return;
+    const p = getPoint(e);
+    if (dragId) {
+      const x = Math.max(0, Math.min(CANVAS_W - 60, snap(p.x - dragOffset.current.x)));
+      const y = Math.max(0, Math.min(CANVAS_H - 40, snap(p.y - dragOffset.current.y)));
+      moveAisleLocal(dragId, { x, y });
+    }
+    if (resizeId) {
+      const dw = p.x - dragOffset.current.startX;
+      const dh = p.y - dragOffset.current.startY;
+      const w = Math.max(60, snap(dragOffset.current.x + dw));
+      const h = Math.max(40, snap(dragOffset.current.y + dh));
+      moveAisleLocal(resizeId, { w, h });
+    }
+  };
+
+  const endDrag = () => {
+    const id = dragId || resizeId;
+    if (id) {
+      const a = aisles.find((a) => a.id === id);
+      if (a) saveAisleLayout(id, { x: a.x, y: a.y, w: a.w, h: a.h });
+    }
+    setDragId(null);
+    setResizeId(null);
+  };
+
+  return (
+    <div className="max-w-3xl">
+      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Floor Plan</h3>
+      <p className="text-sm mb-4" style={{ color: '#8C7A4A' }}>
+        Drag each aisle to match your real store layout. Drag the bottom-right corner to resize it. Shoppers see this
+        exact shape and position in the app.
+      </p>
+
+      <div
+        ref={canvasRef}
+        onMouseMove={onMove}
+        onMouseUp={endDrag}
+        onMouseLeave={endDrag}
+        onTouchMove={onMove}
+        onTouchEnd={endDrag}
+        className="relative rounded-lg overflow-hidden select-none"
+        style={{
+          width: CANVAS_W, height: CANVAS_H, maxWidth: '100%', backgroundColor: '#fff',
+          border: '1px solid #E5DDCB',
+          backgroundImage: 'linear-gradient(#F1EBDA 1px, transparent 1px), linear-gradient(90deg, #F1EBDA 1px, transparent 1px)',
+          backgroundSize: `${GRID * 2}px ${GRID * 2}px`,
+          touchAction: 'none',
+        }}
+      >
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 text-xs font-bold" style={{ color: '#8C7A4A' }}>ENTRANCE</div>
+        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 text-xs font-bold" style={{ color: '#8C7A4A' }}>CHECKOUT</div>
+
+        {aisles.map((a) => (
+          <div
+            key={a.id}
+            onMouseDown={(e) => startDrag(e, a)}
+            onTouchStart={(e) => startDrag(e, a)}
+            className="absolute rounded-md flex flex-col items-center justify-center cursor-move"
+            style={{
+              left: a.x ?? 20, top: a.y ?? 20, width: a.w ?? 170, height: a.h ?? 90,
+              backgroundColor: '#FBEAD3', border: '2px solid #E2891F',
+            }}
+          >
+            <span className="text-xs font-bold font-mono" style={{ color: '#5A3E14' }}>{a.number}</span>
+            <span className="text-xs font-semibold text-center px-1" style={{ color: '#5A3E14' }}>{a.name}</span>
+            <div
+              onMouseDown={(e) => startResize(e, a)}
+              onTouchStart={(e) => startResize(e, a)}
+              className="absolute"
+              style={{
+                right: -4, bottom: -4, width: 16, height: 16, borderRadius: 8,
+                backgroundColor: ORANGE, border: '2px solid #fff', cursor: 'nwse-resize',
+              }}
+            />
+          </div>
+        ))}
       </div>
     </div>
   );
