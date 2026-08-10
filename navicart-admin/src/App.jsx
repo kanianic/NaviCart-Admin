@@ -859,8 +859,16 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
   const [resizeId, setResizeId] = useState(null);
   const dragOffset = useRef({ x: 0, y: 0 });
   const CANVAS_W = 600;
-  const CANVAS_H = 500;
+  const MAX_Y = 4000; // generous ceiling — the canvas itself grows to fit content, this just stops runaway drags
   const GRID = 10;
+
+  // Canvas height grows to fit whatever's actually placed on it, with
+  // a sensible floor so it never looks empty for a small store.
+  const contentHeight = Math.max(
+    500,
+    ...aisles.map((a) => (a.y ?? 20) + (a.h ?? 90)),
+    0
+  ) + 60;
 
   const snap = (v) => Math.round(v / GRID) * GRID;
 
@@ -868,7 +876,7 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
     const rect = canvasRef.current.getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    return { x: clientX - rect.left, y: clientY - rect.top };
+    return { x: clientX - rect.left + canvasRef.current.scrollLeft, y: clientY - rect.top + canvasRef.current.scrollTop };
   };
 
   const startDrag = (e, aisle) => {
@@ -889,13 +897,13 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
     const p = getPoint(e);
     if (dragId) {
       const x = Math.max(0, Math.min(CANVAS_W - 60, snap(p.x - dragOffset.current.x)));
-      const y = Math.max(0, Math.min(CANVAS_H - 40, snap(p.y - dragOffset.current.y)));
+      const y = Math.max(0, Math.min(MAX_Y, snap(p.y - dragOffset.current.y)));
       moveAisleLocal(dragId, { x, y });
     }
     if (resizeId) {
       const dw = p.x - dragOffset.current.startX;
       const dh = p.y - dragOffset.current.startY;
-      const w = Math.max(60, snap(dragOffset.current.x + dw));
+      const w = Math.max(60, Math.min(CANVAS_W, snap(dragOffset.current.x + dw)));
       const h = Math.max(40, snap(dragOffset.current.y + dh));
       moveAisleLocal(resizeId, { w, h });
     }
@@ -915,8 +923,8 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
     <div className="max-w-3xl">
       <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Floor Plan</h3>
       <p className="text-sm mb-4" style={{ color: '#8C7A4A' }}>
-        Drag each aisle to match your real store layout. Drag the bottom-right corner to resize it. Shoppers see this
-        exact shape and position in the app.
+        Drag each aisle to match your real store layout. Drag the bottom-right corner to resize it. Scroll down inside
+        the box below if your store has more aisles than fit on screen. Shoppers see this exact shape and position in the app.
       </p>
 
       <div
@@ -926,42 +934,48 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
         onMouseLeave={endDrag}
         onTouchMove={onMove}
         onTouchEnd={endDrag}
-        className="relative rounded-lg overflow-hidden select-none"
+        className="relative rounded-lg select-none"
         style={{
-          width: CANVAS_W, height: CANVAS_H, maxWidth: '100%', backgroundColor: '#fff',
-          border: '1px solid #E5DDCB',
-          backgroundImage: 'linear-gradient(#F1EBDA 1px, transparent 1px), linear-gradient(90deg, #F1EBDA 1px, transparent 1px)',
-          backgroundSize: `${GRID * 2}px ${GRID * 2}px`,
-          touchAction: 'none',
+          width: CANVAS_W, maxWidth: '100%', maxHeight: 600, overflowY: 'auto', overflowX: 'hidden',
+          backgroundColor: '#fff', border: '1px solid #E5DDCB', touchAction: 'none',
         }}
       >
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 text-xs font-bold" style={{ color: '#8C7A4A' }}>ENTRANCE</div>
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 text-xs font-bold" style={{ color: '#8C7A4A' }}>CHECKOUT</div>
+        <div
+          className="relative"
+          style={{
+            width: CANVAS_W, height: contentHeight,
+            backgroundImage: 'linear-gradient(#F1EBDA 1px, transparent 1px), linear-gradient(90deg, #F1EBDA 1px, transparent 1px)',
+            backgroundSize: `${GRID * 2}px ${GRID * 2}px`,
+          }}
+        >
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 text-xs font-bold" style={{ color: '#8C7A4A' }}>ENTRANCE</div>
+          <div className="absolute text-xs font-bold" style={{ color: '#8C7A4A', bottom: 8, left: '50%', transform: 'translateX(-50%)' }}>CHECKOUT</div>
 
-        {aisles.map((a) => (
-          <div
-            key={a.id}
-            onMouseDown={(e) => startDrag(e, a)}
-            onTouchStart={(e) => startDrag(e, a)}
-            className="absolute rounded-md flex flex-col items-center justify-center cursor-move"
-            style={{
-              left: a.x ?? 20, top: a.y ?? 20, width: a.w ?? 170, height: a.h ?? 90,
-              backgroundColor: '#FBEAD3', border: '2px solid #E2891F',
-            }}
-          >
-            <span className="text-xs font-bold font-mono" style={{ color: '#5A3E14' }}>{a.number}</span>
-            <span className="text-xs font-semibold text-center px-1" style={{ color: '#5A3E14' }}>{a.name}</span>
+          {aisles.map((a) => (
             <div
-              onMouseDown={(e) => startResize(e, a)}
-              onTouchStart={(e) => startResize(e, a)}
-              className="absolute"
+              key={a.id}
+              onMouseDown={(e) => startDrag(e, a)}
+              onTouchStart={(e) => startDrag(e, a)}
+              className="absolute rounded-md flex flex-col items-center justify-center cursor-move"
               style={{
-                right: -4, bottom: -4, width: 16, height: 16, borderRadius: 8,
-                backgroundColor: ORANGE, border: '2px solid #fff', cursor: 'nwse-resize',
+                left: a.x ?? 20, top: a.y ?? 20, width: a.w ?? 170, height: a.h ?? 90,
+                backgroundColor: '#FBEAD3', border: '2px solid #E2891F',
               }}
-            />
-          </div>
-        ))}
+            >
+              <span className="text-xs font-bold font-mono" style={{ color: '#5A3E14' }}>{a.number}</span>
+              <span className="text-xs font-semibold text-center px-1" style={{ color: '#5A3E14' }}>{a.name}</span>
+              <div
+                onMouseDown={(e) => startResize(e, a)}
+                onTouchStart={(e) => startResize(e, a)}
+                className="absolute"
+                style={{
+                  right: -4, bottom: -4, width: 16, height: 16, borderRadius: 8,
+                  backgroundColor: ORANGE, border: '2px solid #fff', cursor: 'nwse-resize',
+                }}
+              />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
