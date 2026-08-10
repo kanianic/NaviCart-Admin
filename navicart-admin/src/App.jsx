@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X, Move } from 'lucide-react';
+import { Store, Plus, Trash2, ClipboardPaste, LayoutGrid, Tags, Tag, Eye, ChevronLeft, AlertTriangle, Loader2, Cloud, CloudOff, BarChart3, Search, PackageX, MapPin, Users, Download, ScanLine, Languages, X, Move, ChefHat } from 'lucide-react';
 
 const INK = '#2B241A';
 const BG = '#1E2B22';
@@ -288,6 +288,7 @@ export default function StoreAdmin() {
   const [aisles, setAisles] = useState([]); // [{id, number, name}]
   const [products, setProducts] = useState([]); // [{id, key, label, aisle_number, price, stock}]
   const [promos, setPromos] = useState([]); // [{id, aisle_number, text}]
+  const [recipes, setRecipes] = useState([]); // [{id, title, description, ingredients, image_url}]
   const [tab, setTab] = useState('aisles');
   const [sync, setSync] = useState('idle'); // idle | saving | error
   const [errorMsg, setErrorMsg] = useState('');
@@ -329,14 +330,16 @@ export default function StoreAdmin() {
     setOpening(true);
     setErrorMsg('');
     try {
-      const [aisleRows, productRows, promoRows] = await Promise.all([
+      const [aisleRows, productRows, promoRows, recipeRows] = await Promise.all([
         sb(`aisles?store_id=eq.${s.id}&select=*&order=number`),
         sb(`products?store_id=eq.${s.id}&select=*&order=aisle_number`),
         sb(`promos?store_id=eq.${s.id}&select=*&order=created_at`),
+        sb(`recipes?store_id=eq.${s.id}&select=*&order=created_at.desc`),
       ]);
       setAisles(aisleRows || []);
       setProducts(productRows || []);
       setPromos(promoRows || []);
+      setRecipes(recipeRows || []);
       setStore(s);
       setTab('aisles');
       setPhase('editor');
@@ -360,6 +363,7 @@ export default function StoreAdmin() {
       setAisles([]);
       setProducts([]);
       setPromos([]);
+      setRecipes([]);
       setStore(s);
       setTab('aisles');
       setPhase('editor');
@@ -431,6 +435,39 @@ export default function StoreAdmin() {
     setSync('saving');
     try {
       await sb(`promos?id=eq.${id}`, { method: 'DELETE' });
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
+  }
+
+  // ---- recipe ops ----
+  async function addRecipe(title, description, ingredients, imageUrl) {
+    if (!title.trim() || !ingredients.trim()) return;
+    setSync('saving');
+    try {
+      const rows = await sb('recipes', {
+        method: 'POST',
+        body: JSON.stringify({
+          store_id: store.id,
+          title: title.trim(),
+          description: description.trim() || null,
+          ingredients: ingredients.trim(),
+          image_url: imageUrl.trim() || null,
+        }),
+      });
+      setRecipes((prev) => [rows[0], ...prev]);
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
+  }
+
+  async function deleteRecipe(id) {
+    setRecipes((prev) => prev.filter((r) => r.id !== id));
+    setSync('saving');
+    try {
+      await sb(`recipes?id=eq.${id}`, { method: 'DELETE' });
       setSync('idle');
     } catch (e) {
       setSync('error');
@@ -710,6 +747,9 @@ export default function StoreAdmin() {
           commitSmartImport={commitSmartImport}
           addPromo={addPromo}
           deletePromo={deletePromo}
+          recipes={recipes}
+          addRecipe={addRecipe}
+          deleteRecipe={deleteRecipe}
         />
       )}
     </div>
@@ -801,6 +841,7 @@ function EditorShell({
   store, session, lang, aisles, products, promos, teamMembers, addStaff, removeStaff, tab, setTab, onBack, sync,
   addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport, commitSmartImport,
   addPromo, deletePromo, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint,
+  recipes, addRecipe, deleteRecipe,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
   const isOwner = store.owner_id === session?.user?.id;
@@ -827,6 +868,7 @@ function EditorShell({
             { id: 'floorplan', label: 'Floor Plan', icon: Move },
             { id: 'products', label: tr.navProducts, icon: Tags },
             { id: 'deals', label: tr.navDeals, icon: Tag },
+            { id: 'recipes', label: 'Recipes', icon: ChefHat },
             { id: 'insights', label: tr.navInsights, icon: BarChart3 },
             ...(isOwner ? [{ id: 'team', label: tr.navTeam, icon: Users }] : []),
             { id: 'preview', label: tr.navPreview, icon: Eye },
@@ -865,6 +907,9 @@ function EditorShell({
         )}
         {tab === 'deals' && (
           <DealsTab aisles={aisles} promos={promos} addPromo={addPromo} deletePromo={deletePromo} />
+        )}
+        {tab === 'recipes' && (
+          <RecipesTab recipes={recipes} addRecipe={addRecipe} deleteRecipe={deleteRecipe} />
         )}
         {tab === 'insights' && <InsightsTab store={store} aisles={aisles} addProduct={addProduct} />}
         {tab === 'team' && isOwner && (
@@ -1163,6 +1208,109 @@ function DealsTab({ aisles, promos, addPromo, deletePromo }) {
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+function RecipesTab({ recipes, addRecipe, deleteRecipe }) {
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [ingredients, setIngredients] = useState('');
+  const [imageUrl, setImageUrl] = useState('');
+
+  const submit = () => {
+    if (!title.trim() || !ingredients.trim()) return;
+    addRecipe(title, description, ingredients, imageUrl);
+    setTitle('');
+    setDescription('');
+    setIngredients('');
+    setImageUrl('');
+    setShowForm(false);
+  };
+
+  return (
+    <div className="max-w-2xl">
+      <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Recipes</h3>
+      <p className="text-sm mb-6" style={{ color: '#8C7A4A' }}>
+        Post a "deal of the week" recipe — shoppers can tap it in the app and add every ingredient to their list in one go.
+      </p>
+
+      <div className="space-y-3 mb-6">
+        {recipes.length === 0 && !showForm && (
+          <p className="text-sm italic" style={{ color: '#B4A87F' }}>No recipes yet — add your first one below.</p>
+        )}
+        {recipes.map((r) => {
+          const ingredientCount = r.ingredients.split('\n').map((l) => l.trim()).filter(Boolean).length;
+          return (
+            <div key={r.id} className="rounded-lg p-4 flex gap-3" style={{ backgroundColor: PAPER }}>
+              {r.image_url ? (
+                <img src={r.image_url} alt={r.title} className="rounded-md object-cover flex-shrink-0" style={{ width: 64, height: 64 }} />
+              ) : (
+                <div className="rounded-md flex items-center justify-center flex-shrink-0" style={{ width: 64, height: 64, backgroundColor: '#FBEAD3' }}>
+                  <ChefHat size={24} color={ORANGE} />
+                </div>
+              )}
+              <div className="flex-1">
+                <p className="text-sm font-bold" style={{ color: INK }}>{r.title}</p>
+                {r.description && <p className="text-xs mt-0.5" style={{ color: '#8C7A4A' }}>{r.description}</p>}
+                <p className="text-xs mt-1 font-semibold" style={{ color: '#4C6B45' }}>{ingredientCount} ingredient{ingredientCount === 1 ? '' : 's'}</p>
+              </div>
+              <button onClick={() => deleteRecipe(r.id)} className="flex-shrink-0">
+                <Trash2 size={15} color={RED} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {!showForm ? (
+        <button onClick={() => setShowForm(true)} className="rounded-lg px-4 py-2.5 flex items-center gap-2 text-sm font-bold" style={{ backgroundColor: ORANGE, color: BG }}>
+          <Plus size={15} /> Add recipe
+        </button>
+      ) : (
+        <div className="rounded-lg p-4" style={{ backgroundColor: PAPER }}>
+          <label className="text-xs font-bold block mb-1" style={{ color: '#8C7A4A' }}>TITLE</label>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Sunday Chili"
+            className="w-full rounded-lg px-3 py-2 text-sm border outline-none mb-3"
+            style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+          />
+          <label className="text-xs font-bold block mb-1" style={{ color: '#8C7A4A' }}>SHORT DESCRIPTION (optional)</label>
+          <input
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="e.g. Ready in 40 minutes, feeds 6"
+            className="w-full rounded-lg px-3 py-2 text-sm border outline-none mb-3"
+            style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+          />
+          <label className="text-xs font-bold block mb-1" style={{ color: '#8C7A4A' }}>IMAGE URL (optional)</label>
+          <input
+            value={imageUrl}
+            onChange={(e) => setImageUrl(e.target.value)}
+            placeholder="https://…"
+            className="w-full rounded-lg px-3 py-2 text-sm border outline-none mb-3"
+            style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+          />
+          <label className="text-xs font-bold block mb-1" style={{ color: '#8C7A4A' }}>INGREDIENTS — one per line</label>
+          <textarea
+            value={ingredients}
+            onChange={(e) => setIngredients(e.target.value)}
+            rows={6}
+            placeholder={'Ground beef\nKidney beans\nDiced tomatoes\nChili powder\nOnion'}
+            className="w-full rounded-lg px-3 py-2 text-sm border outline-none mb-3"
+            style={{ borderColor: '#E5DDCB', color: INK, backgroundColor: '#fff' }}
+          />
+          <div className="flex gap-3">
+            <button onClick={submit} className="rounded-lg px-4 py-2.5 text-sm font-bold" style={{ backgroundColor: GREEN, color: BG }}>
+              Save recipe
+            </button>
+            <button onClick={() => setShowForm(false)} className="text-sm" style={{ color: '#8C7A4A' }}>Cancel</button>
+          </div>
+        </div>
       )}
     </div>
   );
