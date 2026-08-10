@@ -312,8 +312,8 @@ export default function StoreAdmin() {
       const uid = s.user.id;
       const email = s.user.email;
       const [ownedRows, memberRows] = await Promise.all([
-        sb(`stores?select=id,slug,name,owner_id&owner_id=eq.${uid}&order=name`),
-        sb(`store_members?select=store_id,stores(id,slug,name,owner_id)&email=eq.${encodeURIComponent(email)}`),
+        sb(`stores?select=id,slug,name,owner_id,entrance_x,entrance_y,checkout_x,checkout_y&owner_id=eq.${uid}&order=name`),
+        sb(`store_members?select=store_id,stores(id,slug,name,owner_id,entrance_x,entrance_y,checkout_x,checkout_y)&email=eq.${encodeURIComponent(email)}`),
       ]);
       const staffStores = (memberRows || []).map((m) => m.stores).filter(Boolean);
       const byId = new Map();
@@ -478,6 +478,20 @@ export default function StoreAdmin() {
     setSync('saving');
     try {
       await sb(`aisles?id=eq.${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+      setSync('idle');
+    } catch (e) {
+      setSync('error');
+    }
+  }
+
+  // Same pattern, for the store's entrance/checkout markers.
+  function moveStorePointLocal(patch) {
+    setStore((prev) => ({ ...prev, ...patch }));
+  }
+  async function saveStorePoint(patch) {
+    setSync('saving');
+    try {
+      await sb(`stores?id=eq.${store.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
       setSync('idle');
     } catch (e) {
       setSync('error');
@@ -687,6 +701,8 @@ export default function StoreAdmin() {
           deleteAisle={deleteAisle}
           moveAisleLocal={moveAisleLocal}
           saveAisleLayout={saveAisleLayout}
+          moveStorePointLocal={moveStorePointLocal}
+          saveStorePoint={saveStorePoint}
           addProduct={addProduct}
           updateProduct={updateProduct}
           deleteProduct={deleteProduct}
@@ -784,7 +800,7 @@ function Landing({ storeList, newStoreName, setNewStoreName, onOpen, onCreate, o
 function EditorShell({
   store, session, lang, aisles, products, promos, teamMembers, addStaff, removeStaff, tab, setTab, onBack, sync,
   addAisle, renameAisle, deleteAisle, addProduct, updateProduct, deleteProduct, bulkImport, commitSmartImport,
-  addPromo, deletePromo, moveAisleLocal, saveAisleLayout,
+  addPromo, deletePromo, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint,
 }) {
   const unmapped = products.filter((p) => !aisles.some((a) => a.number === p.aisle_number));
   const isOwner = store.owner_id === session?.user?.id;
@@ -835,7 +851,14 @@ function EditorShell({
       <div className="flex-1 p-6 md:p-10" style={{ backgroundColor: CREAM }}>
         {tab === 'aisles' && <AislesTab aisles={aisles} renameAisle={renameAisle} deleteAisle={deleteAisle} addAisle={addAisle} />}
         {tab === 'floorplan' && (
-          <FloorPlanTab aisles={aisles} moveAisleLocal={moveAisleLocal} saveAisleLayout={saveAisleLayout} />
+          <FloorPlanTab
+            store={store}
+            aisles={aisles}
+            moveAisleLocal={moveAisleLocal}
+            saveAisleLayout={saveAisleLayout}
+            moveStorePointLocal={moveStorePointLocal}
+            saveStorePoint={saveStorePoint}
+          />
         )}
         {tab === 'products' && (
           <ProductsTab aisles={aisles} products={products} updateProduct={updateProduct} deleteProduct={deleteProduct} addProduct={addProduct} bulkImport={bulkImport} commitSmartImport={commitSmartImport} />
@@ -853,20 +876,27 @@ function EditorShell({
   );
 }
 
-function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
+function FloorPlanTab({ store, aisles, moveAisleLocal, saveAisleLayout, moveStorePointLocal, saveStorePoint }) {
   const canvasRef = useRef(null);
   const [dragId, setDragId] = useState(null);
   const [resizeId, setResizeId] = useState(null);
+  const [dragPoint, setDragPoint] = useState(null); // 'entrance' | 'checkout' | null
   const dragOffset = useRef({ x: 0, y: 0 });
   const CANVAS_W = 600;
   const MAX_Y = 4000; // generous ceiling — the canvas itself grows to fit content, this just stops runaway drags
   const GRID = 10;
+
+  const entranceX = store.entrance_x ?? 300;
+  const entranceY = store.entrance_y ?? 10;
+  const checkoutX = store.checkout_x ?? 300;
+  const checkoutY = store.checkout_y ?? 480;
 
   // Canvas height grows to fit whatever's actually placed on it, with
   // a sensible floor so it never looks empty for a small store.
   const contentHeight = Math.max(
     500,
     ...aisles.map((a) => (a.y ?? 20) + (a.h ?? 90)),
+    checkoutY + 30,
     0
   ) + 60;
 
@@ -892,8 +922,16 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
     setResizeId(aisle.id);
   };
 
+  const startPointDrag = (e, which) => {
+    e.stopPropagation();
+    const p = getPoint(e);
+    const cur = which === 'entrance' ? { x: entranceX, y: entranceY } : { x: checkoutX, y: checkoutY };
+    dragOffset.current = { x: p.x - cur.x, y: p.y - cur.y };
+    setDragPoint(which);
+  };
+
   const onMove = (e) => {
-    if (!dragId && !resizeId) return;
+    if (!dragId && !resizeId && !dragPoint) return;
     const p = getPoint(e);
     if (dragId) {
       const x = Math.max(0, Math.min(CANVAS_W - 60, snap(p.x - dragOffset.current.x)));
@@ -907,6 +945,12 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
       const h = Math.max(40, snap(dragOffset.current.y + dh));
       moveAisleLocal(resizeId, { w, h });
     }
+    if (dragPoint) {
+      const x = Math.max(0, Math.min(CANVAS_W, snap(p.x - dragOffset.current.x)));
+      const y = Math.max(0, Math.min(MAX_Y, snap(p.y - dragOffset.current.y)));
+      if (dragPoint === 'entrance') moveStorePointLocal({ entrance_x: x, entrance_y: y });
+      else moveStorePointLocal({ checkout_x: x, checkout_y: y });
+    }
   };
 
   const endDrag = () => {
@@ -915,16 +959,20 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
       const a = aisles.find((a) => a.id === id);
       if (a) saveAisleLayout(id, { x: a.x, y: a.y, w: a.w, h: a.h });
     }
+    if (dragPoint === 'entrance') saveStorePoint({ entrance_x: store.entrance_x, entrance_y: store.entrance_y });
+    if (dragPoint === 'checkout') saveStorePoint({ checkout_x: store.checkout_x, checkout_y: store.checkout_y });
     setDragId(null);
     setResizeId(null);
+    setDragPoint(null);
   };
 
   return (
     <div className="max-w-3xl">
       <h3 style={{ fontFamily: DISPLAY_FONT, letterSpacing: -0.5, color: INK, fontSize: 24, fontWeight: 700 }} className="mb-1">Floor Plan</h3>
       <p className="text-sm mb-4" style={{ color: '#8C7A4A' }}>
-        Drag each aisle to match your real store layout. Drag the bottom-right corner to resize it. Scroll down inside
-        the box below if your store has more aisles than fit on screen. Shoppers see this exact shape and position in the app.
+        Drag each aisle to match your real store layout. Drag the bottom-right corner to resize it. Drag the green
+        (entrance) and orange (checkout) pins to wherever they actually sit — they don't have to be top and bottom.
+        Scroll down inside the box below if your store has more aisles than fit on screen.
       </p>
 
       <div
@@ -948,9 +996,6 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
             backgroundSize: `${GRID * 2}px ${GRID * 2}px`,
           }}
         >
-          <div className="absolute top-2 left-1/2 -translate-x-1/2 text-xs font-bold" style={{ color: '#8C7A4A' }}>ENTRANCE</div>
-          <div className="absolute text-xs font-bold" style={{ color: '#8C7A4A', bottom: 8, left: '50%', transform: 'translateX(-50%)' }}>CHECKOUT</div>
-
           {aisles.map((a) => (
             <div
               key={a.id}
@@ -975,6 +1020,26 @@ function FloorPlanTab({ aisles, moveAisleLocal, saveAisleLayout }) {
               />
             </div>
           ))}
+
+          <div
+            onMouseDown={(e) => startPointDrag(e, 'entrance')}
+            onTouchStart={(e) => startPointDrag(e, 'entrance')}
+            className="absolute flex flex-col items-center cursor-move"
+            style={{ left: entranceX - 30, top: entranceY - 10, width: 60 }}
+          >
+            <div style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: GREEN, border: '2px solid #fff', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} />
+            <span className="text-xs font-bold mt-1" style={{ color: '#4C6B45' }}>ENTRANCE</span>
+          </div>
+
+          <div
+            onMouseDown={(e) => startPointDrag(e, 'checkout')}
+            onTouchStart={(e) => startPointDrag(e, 'checkout')}
+            className="absolute flex flex-col items-center cursor-move"
+            style={{ left: checkoutX - 30, top: checkoutY - 10, width: 60 }}
+          >
+            <div style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: ORANGE, border: '2px solid #fff', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} />
+            <span className="text-xs font-bold mt-1" style={{ color: '#8C6A1F' }}>CHECKOUT</span>
+          </div>
         </div>
       </div>
     </div>
