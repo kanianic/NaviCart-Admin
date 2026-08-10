@@ -2252,6 +2252,7 @@ function InsightsTab({ store, aisles, addProduct }) {
   const searches = events.filter((e) => e.type === 'search');
   const notFound = events.filter((e) => e.type === 'not_found');
   const aisleVisits = events.filter((e) => e.type === 'aisle_visit');
+  const routesBuilt = events.filter((e) => e.type === 'route_built');
 
   const topSearched = countBy(searches, 'item_name').slice(0, 8);
   const topNotFound = countBy(notFound, 'item_name').slice(0, 8);
@@ -2266,6 +2267,7 @@ function InsightsTab({ store, aisles, addProduct }) {
   const exportInsightsCsv = () => {
     const rows = [
       ['Type', 'Item / Aisle', 'Count'],
+      ['Routes Mapped', 'Total', routesBuilt.length],
       ...topSearched.map(([name, count]) => ['Top Searched', name, count]),
       ...topNotFound.map(([name, count]) => ["Don't Carry", name, count]),
       ...topAisles.map(([num, count]) => ['Aisle Traffic', `Aisle ${num} · ${aisleName(num)}`, count]),
@@ -2300,7 +2302,8 @@ function InsightsTab({ store, aisles, addProduct }) {
         </p>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-3 mb-8">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+            <StatCard label="Routes mapped" value={routesBuilt.length} />
             <StatCard label="Searches" value={searches.length} />
             <StatCard label="Aisles visited" value={aisleVisits.length} />
             <StatCard label="Items you don't carry" value={new Set(notFound.map((e) => e.item_name)).size} />
